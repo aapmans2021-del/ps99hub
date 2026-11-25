@@ -1387,9 +1387,16 @@ do
     local fullscreen = Settings.values.fullscreen == true
     local function applyFull()
         if fullscreen then
-            win.AnchorPoint = Vector2.zero
-            win.Position = UDim2.fromOffset(0, 0)
-            win.Size = UDim2.new(1 / scale.Scale, 0, 1 / scale.Scale, 0)
+            -- scale-based sizes ignore the UIScale, so 1 x 1 centred is the whole screen
+            win.AnchorPoint = Vector2.new(0.5, 0.5)
+            win.Position = UDim2.fromScale(0.5, 0.5)
+            win.Size = UDim2.fromScale(1, 1)
+            -- cover the whole screen, top bar included; the logo and title slide
+            -- right so Roblox's menu buttons in the corner don't sit on them
+            gui.IgnoreGuiInset = true
+            logo.Position = UDim2.fromOffset(176, 18)
+            title.Position = UDim2.fromOffset(244, 18)
+            subtitle.Position = UDim2.fromOffset(245, 50)
             winCorner.CornerRadius = UDim.new(0, 0)
             sceneCorner.CornerRadius = UDim.new(0, 0)
             halo.Visible = false
@@ -1397,6 +1404,10 @@ do
             win.AnchorPoint = Vector2.new(0.5, 0.5)
             win.Position = UDim2.fromScale(0.5, 0.5)
             win.Size = UDim2.fromOffset(1000, 640)
+            gui.IgnoreGuiInset = true
+            logo.Position = UDim2.fromOffset(20, 18)
+            title.Position = UDim2.fromOffset(88, 18)
+            subtitle.Position = UDim2.fromOffset(89, 50)
             winCorner.CornerRadius = UDim.new(0, 22)
             sceneCorner.CornerRadius = UDim.new(0, 22)
             halo.Visible = true
@@ -2620,7 +2631,14 @@ do
         local img = imageUrl(info.thumb)
         if img then embed.thumbnail = { url = img } end
         local body = { username = "PS99 Hub", embeds = { embed } }
-        if S.on.webhookping then body.content = "@everyone" end
+        -- only ever pings the one Discord user ID you saved, never @everyone / @here
+        local pingId = tostring(Settings.values.webhookPingId or ""):match("^%s*(%d+)%s*$")
+        if S.on.webhookping and pingId and #pingId >= 15 then
+            body.content = ("<@%s>"):format(pingId)
+            body.allowed_mentions = { users = { pingId } }
+        else
+            body.allowed_mentions = { parse = {} }
+        end
         local ok, res = pcall(httpRequest, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
         if not ok then return false, tostring(res) end
         local code = type(res) == "table" and tonumber(res.StatusCode) or 0
@@ -3249,7 +3267,8 @@ do
     UI.toggle(s, "webhook", "Discord Webhook", "Posts every huge, titanic and gargantuan to your Discord channel", false)
     UI.status(s, "webhook", "Off")
     UI.textbox(s, "webhookUrl", "Webhook URL", "https://discord.com/api/webhooks/...", true)
-    UI.toggle(s, "webhookping", "Ping @everyone", nil, false)
+    UI.toggle(s, "webhookping", "Ping Me", "Pings only the Discord user ID below", false)
+    UI.textbox(s, "webhookPingId", "Your Discord user ID", "e.g. 123456789012345678 (Developer Mode > Copy User ID)", false)
     UI.button(s, "Send test message", function()
         if not Webhook.url() then
             UI.toast("WEBHOOK", "Paste a Discord webhook URL first", THEME.bad)
