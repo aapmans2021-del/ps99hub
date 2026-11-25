@@ -164,6 +164,7 @@ local function pdBuildScene(parent, opts)
     local function range(count, x0, x1, heightFn, colourFn, transparency, mirror)
         local holder = frame(Color3.new(1, 1, 1), 1)
         holder.Size = UDim2.fromScale(1, 1)
+        count = math.max(24, math.floor(count * (opts.detail or 1)))
         local width = (x1 - x0) / count
         for i = 0, count - 1 do
             local x = x0 + (i + 0.5) * width
@@ -451,9 +452,9 @@ local function pdBuildScene(parent, opts)
         -- blossoms: a shadow layer under, the body, then highlights on top
         for pass = 1, 3 do
             for _, tip in ipairs(tips) do
-                local count = pass == 1 and 5 or (pass == 2 and 8 or 3)
+                local count = math.max(1, math.floor((pass == 1 and 5 or (pass == 2 and 8 or 3)) * (opts.detail or 1) + 0.5))
                 for _ = 1, count do
-                    local s = r:NextNumber(0.035, 0.075) * (pass == 3 and 0.6 or 1)
+                    local s = r:NextNumber(0.035, 0.075) * (pass == 3 and 0.6 or 1) * ((opts.detail or 1) < 1 and 1.3 or 1)
                     local colour = pass == 1 and BLOSSOM_SHADOW or (pass == 2 and PINKS[r:NextInteger(1, #PINKS)] or BLOSSOM_LIGHT)
                     local d = round(frame(colour, pass == 3 and 0.25 or r:NextNumber(0, 0.15), tree))
                     d.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -615,7 +616,7 @@ local function pdBuildScene(parent, opts)
             l.glow.Transparency = 1 - fade * (0.4 + 0.15 * math.sin(clock * 3 + l.phase))
         end
         for _, t in ipairs(trees) do
-            t.frame.Rotation = math.sin(clock * 0.7 + t.phase) * 0.7 * wind
+            if not opts.noSway then t.frame.Rotation = math.sin(clock * 0.7 + t.phase) * 0.7 * wind end
         end
         for i, w in ipairs(windows) do
             w.BackgroundTransparency = 0.06 + 0.12 * (0.5 + 0.5 * math.sin(clock * (2.1 + i * 0.37) + i))
@@ -783,7 +784,13 @@ local S = {
 }
 env.__PS99HUB_STATE = S
 local function alive() return S.alive end
-local function setStatus(key, text) S.status[key] = text end
+local function setStatus(key, text)
+    if S.status[key] == text then return end
+    S.status[key] = text
+    -- push straight to the UI (no waiting for the next refresh)
+    local push = env.__PS99HUB_PUSH_STATUS
+    if push then pcall(push, key, text) end
+end
 
 -- teleport lock: only one feature moves the character at a time, and it
 -- always puts you back where you were
@@ -901,8 +908,15 @@ do
     local function shown()
         return win.Visible and gui.Enabled
     end
-    UI.sceneFps = tonumber(Settings.values.sceneFps) or 24
-    local sceneHandle = pdBuildScene(sceneHost, { active = shown, fps = function() return UI.sceneFps end })
+    UI.sceneFps = tonumber(Settings.values.sceneFps) or 15
+    local sceneHandle = pdBuildScene(sceneHost, { active = shown, fps = function() return UI.sceneFps end, detail = 0.4, noSway = true })
+    -- a CanvasGroup re-renders its whole picture whenever anything inside
+    -- moves; it is only needed to round the corners. Fullscreen has square
+    -- corners, so there the scene lives in a plain clipping frame instead.
+    local sceneFlat = new("Frame", { Name = "SceneFlat", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        ClipsDescendants = true, ZIndex = 0, Visible = false }, win)
+
+    UI.sceneHosts = { round = sceneHost, flat = sceneFlat }
     -- a light dusk wash keeps text readable without hiding the scene
     local wash = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.82, ZIndex = 1 }, win)
     corner(wash, 22)
@@ -1213,6 +1227,8 @@ do
             S.on[key] = state
             paint(animate)
             if state and env.__PS99HUB_KICK then env.__PS99HUB_KICK(key) end
+            if env.__PS99HUB_REFRESH_COUNTS then pcall(env.__PS99HUB_REFRESH_COUNTS) end
+            if env.__PS99HUB_PUSH_STATUS then pcall(env.__PS99HUB_PUSH_STATUS, key, S.status[key] or (state and "Starting..." or "Off")) end
             if onChange then task.spawn(pcall, onChange, state) end
         end
         function handle.flip() handle.set(not state, true) return state end
@@ -1418,6 +1434,10 @@ do
             winCorner.CornerRadius = UDim.new(0, 0)
             sceneCorner.CornerRadius = UDim.new(0, 0)
             halo.Visible = false
+            pcall(function()
+                UI.sceneHandle.frame.Parent = UI.sceneHosts.flat
+                UI.sceneHosts.flat.Visible, UI.sceneHosts.round.Visible = true, false
+            end)
         else
             win.AnchorPoint = Vector2.new(0.5, 0.5)
             win.Position = UDim2.fromScale(0.5, 0.5)
@@ -1429,6 +1449,12 @@ do
             winCorner.CornerRadius = UDim.new(0, 22)
             sceneCorner.CornerRadius = UDim.new(0, 22)
             halo.Visible = true
+            -- windowed uses the cheap flat host too: rounded-corner clipping
+            -- (a CanvasGroup) cost far more FPS than it was worth
+            pcall(function()
+                UI.sceneHandle.frame.Parent = UI.sceneHosts.flat
+                UI.sceneHosts.flat.Visible, UI.sceneHosts.round.Visible = true, false
+            end)
         end
     end
     applyFull()
@@ -1687,6 +1713,7 @@ function F.kick(key)
     if l then l.next = 0 end
 end
 env.__PS99HUB_KICK = F.kick
+env.__PS99HUB_LOOPS = loops
 task.spawn(function()
     while alive() do
         local now = os.clock()
@@ -1695,7 +1722,10 @@ task.spawn(function()
                 l.next = now + l.interval
                 l.running = true
                 task.spawn(function()
+                    local t0 = os.clock()
                     local ok, err = pcall(l.fn)
+                    local spent = os.clock() - t0
+                    if spent > (l.worst or 0) then l.worst = spent end
                     if not ok then setStatus(l.key, "error: " .. tostring(err):sub(1, 80)) end
                     l.running = false
                 end)
@@ -1818,6 +1848,9 @@ do
         return math.max(0, math.floor(amount / S.shrink))
     end
     F.nearestEgg = nearestEgg
+    RunService.Heartbeat:Connect(function()
+        if S.on.hatch and alive() and G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
+    end)
     local running = false
     local inFlight = 0
     function F.startHatch()
@@ -1843,44 +1876,57 @@ do
                     else
                         if G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
                         S.perHatch = amount
-                        -- pace sends on the game's hatch cooldown (shortened by
-                        -- mastery) instead of waiting out each round trip; at
-                        -- most two requests are ever in flight
+                        -- fastest the server allows: it enforces its own cooldown
+                        -- (~1.3-1.6s with your mastery) and refusals come back
+                        -- instantly and cost nothing. So: send a little before the
+                        -- cooldown ends, retry every 60ms until the window opens,
+                        -- and learn how early to start from how many tries it took.
                         local okD, cooldown = pcall(G.EggCmds.ComputeDebounce)
-                        cooldown = (okD and tonumber(cooldown) or 2.5) + (S.hatchSlack or 0.05)
-                        local sentAt = os.clock()
-                        inFlight += 1
-                        task.spawn(function()
+                        cooldown = okD and tonumber(cooldown) or 2.5
+                        S.hatchLead = S.hatchLead or 0.35
+                        local readyAt = (S.lastHatchOk or 0) + cooldown - S.hatchLead
+                        while os.clock() < readyAt and S.on.hatch do task.wait(0.02) end
+                        local tries, done = 0, false
+                        while not done and S.on.hatch and alive() do
+                            tries += 1
+                            -- keep the "already opening" flag up so the game never
+                            -- plays the hatch animation
+                            if G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
+                            local sentAt = os.clock()
                             local okH, success, err
                             if egg.kind == "custom" then
                                 okH, success, err = pcall(G.Network.Invoke, "CustomEggs_Hatch", egg.key, amount)
                             else
                                 okH, success, err = pcall(G.Network.Invoke, "Eggs_RequestPurchase", egg.key, amount)
                             end
-                            inFlight -= 1
                             if okH and success then
+                                -- the server's clock started roughly mid-trip
+                                S.lastHatchOk = sentAt + (os.clock() - sentAt) / 2
                                 S.eggs += amount
                                 S.hatches += 1
                                 S.shrink = 1
-                                S.hatchSlack = math.max(0.02, (S.hatchSlack or 0.05) - 0.005)
+                                -- landed first try: start earlier next time; needed
+                                -- many tries: start a bit later
+                                if tries == 1 then S.hatchLead = math.min(cooldown * 0.9, S.hatchLead + 0.04)
+                                elseif tries > 4 then S.hatchLead = math.max(0, S.hatchLead - 0.04) end
                                 setStatus("hatch", ("Hatching %s  ·  %d per hatch  ·  %s eggs"):format(egg.id, amount, commas(S.eggs)))
+                                done = true
                             else
                                 local raw = okH and tostring(err or success) or tostring(success)
                                 local msg = raw:lower()
                                 S.hatchFail = raw
                                 if msg:find("enough") or msg:find("afford") or msg:find("coins") then
                                     S.shrink = math.min(S.shrink * 2, 64)
+                                    setStatus("hatch", ("%s: %s  ·  hatching fewer"):format(egg.id, raw:sub(1, 60)))
+                                    done = true
+                                elseif tries >= 70 then
+                                    setStatus("hatch", ("%s: %s  ·  retrying"):format(egg.id, raw:sub(1, 60)))
+                                    done = true
                                 else
-                                    -- too early: back the beat off a little
-                                    S.hatchSlack = math.min(0.6, (S.hatchSlack or 0.05) + 0.05)
+                                    task.wait(0.06)
                                 end
-                                setStatus("hatch", ("%s: %s  ·  retrying"):format(egg.id, raw:sub(1, 60)))
                             end
-                        end)
-                        -- wait out the cooldown; never wait forever on a lost reply
-                        while (os.clock() - sentAt < cooldown or inFlight >= 2) and os.clock() - sentAt < cooldown + 4 do task.wait(0.03) end
-                        if inFlight >= 2 then inFlight = 1 end
-                    end
+                        end                    end
                 end
             end
             task.wait(0.6)
@@ -1915,6 +1961,13 @@ do
             pcall(function() S.hasVip = require(RS.Library.Client.Gamepasses).Owns("VIP") == true end)
             local function myPets()
                 local out = {}
+                local okB, list = pcall(G.PlayerPet.GetByPlayer, LocalPlayer)
+                if okB and type(list) == "table" then
+                    for _, pet in pairs(list) do
+                        if type(pet) == "table" and pet.euid then out[#out + 1] = { euid = pet.euid, pet = pet } end
+                    end
+                    if #out > 0 then return out end
+                end
                 for euid, pet in pairs(G.PlayerPet.GetAll()) do
                     local ok, own = pcall(function() return pet:BelongsToLocalPlayer() end)
                     if ok and own then out[#out + 1] = { euid = euid, pet = pet } end
@@ -1952,12 +2005,15 @@ do
                             end
                             if ok then
                                 valid[#valid + 1] = b
+                                local isFocus = false
                                 if focusWords then
                                     local bid = tostring(b:GetAttribute("BreakableID") or "")
                                     for _, w in ipairs(focusWords) do
-                                        if bid:find(w, 1, true) then focus[#focus + 1] = b break end
+                                        if bid:find(w, 1, true) then isFocus = true break end
                                     end
                                 end
+
+                                if isFocus then focus[#focus + 1] = b end
                             end
                         end
                     end
@@ -1975,6 +2031,17 @@ do
                         if cur and isTarget[cur] and cur.Parent then load[cur] += 1 end
                     end
                     local join, changed = {}, false
+                    -- positions looked up once per tick, only if a pet needs a target
+                    local posCache = {}
+                    local function posOf(b)
+                        local p = posCache[b]
+                        if p == nil then
+                            local okB, bp = pcall(function() return b:GetPivot().Position end)
+                            p = okB and bp or false
+                            posCache[b] = p
+                        end
+                        return p
+                    end
                     for _, entry in ipairs(pets) do
                         local cur = assigned[entry.euid]
                         if not (cur and isTarget[cur] and cur.Parent) then
@@ -1985,9 +2052,9 @@ do
                             for _, b in ipairs(targets) do
                                 local l = load[b]
                                 local d = 0
-                                if okPos then
-                                    local okB, bp = pcall(function() return b:GetPivot().Position end)
-                                    d = okB and (bp - petPos).Magnitude or 0
+                                if okPos and l <= (bestLoad or math.huge) then
+                                    local bp = posOf(b)
+                                    d = bp and (bp - petPos).Magnitude or 0
                                 end
                                 if not bestLoad or l < bestLoad or (l == bestLoad and d < bestD) then best, bestLoad, bestD = b, l, d end
                             end
@@ -3677,23 +3744,42 @@ do
         BEST_PINATA = { "^Mini Pinata$", "MiniPinata_Consume" }, PINATA = { "^Mini Pinata$", "MiniPinata_Consume" },
         BEST_LUCKYBLOCK = { "^Mini Lucky Block$", "MiniLuckyBlock_Consume" }, LUCKYBLOCK = { "^Mini Lucky Block$", "MiniLuckyBlock_Consume" },
     }
-    local lastSpawn = {}
+    -- spawn one of your own event items where you stand. Returns
+    -- (spawned, itemName, reason): reason "busy" = the area already has an
+    -- event going (the game allows one at a time), "none" = you have none
+    local lastTry, busyUntil, lastNote = {}, {}, {}
     local function spawnOwn(kind)
         local spec = SPAWNERS[kind]
-        if not spec or os.clock() - (lastSpawn[kind] or 0) < 20 then return false end
-        for _, item in pairs(inventoryItems()) do
-            local id = itemId(item)
-            if id and id:match(spec[1]) then
-                lastSpawn[kind] = os.clock()
-                return (invoke(spec[2], item:GetUID())) and true or false, id
-            end
+        if not spec then return false, nil, "none" end
+        local item, id
+        for _, it in pairs(inventoryItems()) do
+            local iid = itemId(it)
+            if iid and iid:match(spec[1]) then item, id = it, iid break end
         end
-        return false
+        if not item then return false, nil, "none" end
+        if os.clock() < (busyUntil[kind] or 0) then return false, id, "busy" end
+        if os.clock() - (lastTry[kind] or 0) < 3 then return false, id, lastNote[kind] or "wait" end
+        lastTry[kind] = os.clock()
+        local ok, msg = invoke(spec[2], item:GetUID())
+        if ok then
+            lastNote[kind] = "spawned"
+            busyUntil[kind] = os.clock() + 4
+            invAt = 0
+            return true, id
+        end
+        if tostring(msg):lower():find("already") then
+            busyUntil[kind] = os.clock() + 6
+            lastNote[kind] = "busy"
+            return false, id, "busy"
+        end
+        lastNote[kind] = tostring(msg)
+        return false, id, tostring(msg)
     end
+    Quest.spawnOwn = spawnOwn
     local FOCUS = {
-        BEST_MINI_CHEST = { "Mini Chest", "Chest" }, BEST_SUPERIOR_MINI_CHEST = { "Superior Mini Chest", "Superior" },
-        BEST_COMET = { "Comet" }, BEST_COIN_JAR = { "Coin Jar", "Jar" }, BEST_PINATA = { "Pinata", "Piñata" },
-        BEST_LUCKYBLOCK = { "Lucky Block", "LuckyBlock", "Lucky" },
+        BEST_MINI_CHEST = { "Mini Chest" }, BEST_SUPERIOR_MINI_CHEST = { "Superior Mini Chest" },
+        BEST_COMET = { "Comet" }, BEST_COIN_JAR = { "Coin Jar" }, BEST_PINATA = { "Pinata", "Piñata" },
+        BEST_LUCKYBLOCK = { "Lucky Block", "LuckyBlock" },
     }
     for _, name in ipairs({ "CURRENT_BREAKABLE", "BEST_MINI_CHEST", "BEST_SUPERIOR_MINI_CHEST", "BEST_COMET", "BEST_COIN_JAR", "BEST_PINATA", "BEST_LUCKYBLOCK" }) do
         if GOAL[name] then handlers[GOAL[name]] = function(goal)
@@ -3706,16 +3792,22 @@ do
             Quest.zoneLock = zoneLabel(bz)
             -- a comet or coin jar drops a pile of extra breakables right in the
             -- best area: the fastest way through "break N breakables" quests
-            if name == "CURRENT_BREAKABLE" and S.on.questitems ~= false then
-                local spawned, what = spawnOwn("BEST_COMET")
-                if not spawned then spawned, what = spawnOwn("BEST_COIN_JAR") end
-                if spawned then return ("Farming the best area  ·  dropped a %s for extra breakables"):format(what) end
+            if name == "CURRENT_BREAKABLE" then
+                -- comets / coin jars don't speed up plain breakable quests, so
+                -- they are only ever used for their own quests
+                return "Farming the best area"
             end
             if FOCUS[name] then
                 for _, w in ipairs(FOCUS[name]) do table.insert(Quest.focus, w) end
             end
-            local spawned, what = spawnOwn(name)
-            if spawned then return ("Spawned your %s in the best area"):format(what) end
+            if SPAWNERS[name] and S.on.questitems ~= false then
+                local spawned, what, why = spawnOwn(name)
+                if spawned then return ("Used your %s - pets are on it"):format(what) end
+                if why == "busy" then return ("Breaking the %s already in the area, then using the next one"):format(what or "event") end
+                if why == "none" then return "None of these in your inventory - breaking random ones when they show up" end
+                if why == "spawned" or why == "wait" then return ("Pets are breaking your %s"):format(what or "item") end
+                return ("Can't use %s here: %s"):format(tostring(what), tostring(why))
+            end
             return "Farming the best area"
         end end
     end
@@ -3733,6 +3825,11 @@ do
         if type(goals) ~= "table" then return setStatus("autoquest", "No rank quests found") end
         table.clear(wanted)
         Quest.zoneLock, Quest.focus = nil, {}
+        -- which quest types are still open (used to share the area's event slot)
+        Quest.types = {}
+        for _, g in pairs(goals) do
+            if (g.Progress or 0) < (g.Amount or 1) then Quest.types[g.Type] = true end
+        end
         local plans, done, blocked = {}, 0, 0
         local bz = bestZone()
         local slots = {}
@@ -3767,18 +3864,27 @@ do
         S.farmZone = Quest.zoneLock
         S.farmFocus = #Quest.focus > 0 and Quest.focus or nil
         -- hand back anything a quest switched on that no quest wants now
+        -- (only after no quest has wanted it for 10s, so quests rotating or a
+        -- one-tick hiccup never flicker the farm off and on)
+        Quest.unwantedSince = Quest.unwantedSince or {}
         for key in pairs(Quest.enabledByQuest) do
-            if not wanted[key] then
-                Quest.enabledByQuest[key] = nil
-                local h = UI.handles and UI.handles[key]
-                if h and h.get() then h.set(false, true) end
+            if wanted[key] then
+                Quest.unwantedSince[key] = nil
+            else
+                Quest.unwantedSince[key] = Quest.unwantedSince[key] or os.clock()
+                if os.clock() - Quest.unwantedSince[key] > 10 then
+                    Quest.enabledByQuest[key] = nil
+                    Quest.unwantedSince[key] = nil
+                    local h = UI.handles and UI.handles[key]
+                    if h and h.get() then h.set(false, true) end
+                end
             end
         end
         setStatus("autoquest", ("%d/%d done  ·  %d need the best area or your hands  ·  rank %s, %s stars"):format(done, #plans, blocked, tostring(save().Rank), tostring(save().RankStars)))
     end)
     -- turning auto quests off gives back what it switched on
     function Quest.release()
-        S.farmZone, S.farmFocus = nil, nil
+        S.farmZone, S.farmFocus, S.farmFocusPoints = nil, nil, nil
         for key in pairs(Quest.enabledByQuest) do
             local h = UI.handles and UI.handles[key]
             if h and h.get() then h.set(false, true) end
@@ -3795,6 +3901,20 @@ do
     local OrbMod
     pcall(function() OrbMod = require(RS.Library.Client.OrbCmds.Orb) end)
     local original = OrbMod and OrbMod.DefaultPickupDistance or 20
+    -- instant pickup: lootbags normally sit 1.5-2.5s (coins up to 0.65s)
+    -- before the magnet takes them; drop that wait and let them fly in from
+    -- anywhere (the game's own super magnet). 2.06s -> 0.55s average.
+    if OrbMod and not env.__PS99HUB_ORB_NEW then
+        env.__PS99HUB_ORB_NEW = OrbMod.new
+        OrbMod.new = function(...)
+            local o = env.__PS99HUB_ORB_NEW(...)
+            if type(o) == "table" and S.on.autopickup and S.on.instantpickup ~= false then
+                o._pickupDelay = 0
+                o._superMagnet = true
+            end
+            return o
+        end
+    end
     task.spawn(function()
         while alive() do
             if OrbMod then
@@ -3843,6 +3963,7 @@ do
     UI.toggle(s, "autopickup", "Auto Pickup Everything", "Coins, diamonds, lootbags and all drops, from far away", true)
     UI.status(s, "autopickup", "Off")
     UI.slider(s, "pickupRange", "Pickup range (studs)", 40, 600, 250, 10)
+    UI.toggle(s, "instantpickup", "Instant Pickup", "Lootbags and coins fly to you the moment they drop (no 2s wait)", true)
     UI.toggle(s, "farm", "Fast Farm", "Pets break everything within 100 studs, orbs and lootbags collected", false, function(on) if on then F.startFarm() end end)
     UI.status(s, "farm", "Off")
     UI.toggle(s, "ultimate", "Auto Ultimate", "Fires your equipped ultimate whenever it is charged in a zone", false)
@@ -4135,7 +4256,7 @@ do
         if not on then Quest.release() end
     end)
     UI.status(s, "autoquest", "Off")
-    UI.toggle(s, "questitems", "Use My Comets & Coin Jars", "Drops them in the best area to finish breakable quests faster", true)
+    UI.toggle(s, "questitems", "Use My Quest Items", "Comets, coin jars, piñatas and lucky blocks - only for quests that ask for them", true)
     do
         local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
         local cards = {}
@@ -4292,7 +4413,7 @@ do
     UI.slider(s, "walkspeedValue", "Walk speed", 16, 120, 40, 1, function(v) walkSpeed = v end)
     s = UI.section(misc, "Interface", THEME.accent)
     UI.slider(s, "glass", "Glass opacity %", 10, 200, 100, 5, function(v) UI.setGlass(v) end)
-    UI.slider(s, "sceneFps", "Background animation FPS (0 = still)", 0, 60, 24, 6, function(v) UI.sceneFps = v end)
+    UI.slider(s, "sceneFps", "Background animation FPS (0 = still)", 0, 60, 15, 3, function(v) UI.sceneFps = v end)
     UI.keybind(s, "hide", "Show / hide hub", "LeftControl")
     UI.keybind(s, "panic", "Stop everything", "End")
     UI.keybind(s, "palette", "Search palette", "Backquote")
@@ -4476,34 +4597,56 @@ end
 ----------------------------------------------------------------------
 -- LIVE UPDATES
 ----------------------------------------------------------------------
+-- status lines: pushed the moment a feature reports (setStatus), with this
+-- loop only catching switches turning off
+local linesByKey = {}
+for _, line in ipairs(UI.statusLines) do
+    linesByKey[line.key] = linesByKey[line.key] or {}
+    table.insert(linesByKey[line.key], line)
+end
+local GOOD, BAD = Color3.fromRGB(150, 230, 170), Color3.fromRGB(255, 140, 150)
+local function paintLine(line, text)
+    if line.label.Text == text then return end
+    line.label.Text = text
+    local low = text:lower()
+    local colour = THEME.muted
+    if low:find("refused") or low:find("error") or low:find("can't") or low:find("out of") or low:find("missed") then
+        colour = BAD
+    elseif low:find("^caught") or low:find("^bought") or low:find("^claimed") or low:find("^hatching") or low:find("^farming")
+        or low:find("^upgraded") or low:find("^enrolled") or low:find("^spun") or low:find("^used") or low:find("^opened") then
+        colour = GOOD
+    end
+    line.label.TextColor3 = colour
+end
+env.__PS99HUB_PUSH_STATUS = function(key, text)
+    local lines = linesByKey[key]
+    if not lines then return end
+    if not S.on[key] then text = "Off" end
+    for _, line in ipairs(lines) do paintLine(line, text) end
+end
+-- tab badges + running chip: redrawn the moment any switch changes
+local function refreshCounts()
+    local running = 0
+    for _, t in ipairs(UI.tabs) do
+        local n = 0
+        for _, h in ipairs(t.toggles) do if h.get() then n += 1 end end
+        t.badge.Text = tostring(n)
+        t.badge.Visible = n > 0
+        running += n
+    end
+    UI.runChip.Text = running > 0 and ("%d RUNNING"):format(running) or "ALL IDLE"
+    return running
+end
+env.__PS99HUB_REFRESH_COUNTS = refreshCounts
 task.spawn(function()
     local beat = 0
     while alive() do
         for _, line in ipairs(UI.statusLines) do
             local text = S.status[line.key]
             if not S.on[line.key] then text = "Off" end
-            if text and line.label.Text ~= text then
-                line.label.Text = text
-                local low = text:lower()
-                local colour = THEME.muted
-                if low:find("refused") or low:find("error") or low:find("can't") or low:find("out of") or low:find("missed") then
-                    colour = Color3.fromRGB(255, 140, 150)
-                elseif low:find("^caught") or low:find("^bought") or low:find("^claimed") or low:find("^hatching") or low:find("^farming")
-                    or low:find("^upgraded") or low:find("^enrolled") or low:find("^spun") or low:find("^used") or low:find("^opened") then
-                    colour = Color3.fromRGB(150, 230, 170)
-                end
-                line.label.TextColor3 = colour
-            end
+            if text then paintLine(line, text) end
         end
-        local running = 0
-        for _, t in ipairs(UI.tabs) do
-            local n = 0
-            for _, h in ipairs(t.toggles) do if h.get() then n += 1 end end
-            t.badge.Text = tostring(n)
-            t.badge.Visible = n > 0
-            running += n
-        end
-        UI.runChip.Text = running > 0 and ("%d RUNNING"):format(running) or "ALL IDLE"
+        local running = refreshCounts()
         beat += 1
         UI.pulse.BackgroundColor3 = running > 0 and THEME.on or THEME.muted
         UI.pulse.BackgroundTransparency = (running > 0 and beat % 2 == 0) and 0.5 or 0
@@ -4565,6 +4708,12 @@ end)
 env.__PS99HUB_CLEANUP = function()
     S.alive = false
     pcall(function() require(RS.Library.Client.OrbCmds.Orb).DefaultPickupDistance = 20 end)
+    pcall(function()
+        if env.__PS99HUB_ORB_NEW then
+            require(RS.Library.Client.OrbCmds.Orb).new = env.__PS99HUB_ORB_NEW
+            env.__PS99HUB_ORB_NEW = nil
+        end
+    end)
     for k in pairs(S.on) do S.on[k] = false end
     env.__PS99HUB_FARM_ON = false
     pcall(function() G.Variables.OpeningEgg = 0 end)
