@@ -180,6 +180,9 @@ local function pdBuildScene(parent, opts)
                     slice.Size = UDim2.new(width, 1, h, 0)
                 end
             end
+            -- Build the same scene in small batches so creating hundreds of
+            -- mountain slices cannot monopolize a single game frame.
+            if (i + 1) % 32 == 0 then task.wait() end
         end
         return holder
     end
@@ -1437,6 +1440,8 @@ do
             pcall(function()
                 UI.sceneHandle.frame.Parent = UI.sceneHosts.flat
                 UI.sceneHosts.flat.Visible, UI.sceneHosts.round.Visible = true, false
+                -- fullscreen has square corners: the scene fills it edge to edge
+                UI.sceneHosts.flat.Position, UI.sceneHosts.flat.Size = UDim2.new(), UDim2.fromScale(1, 1)
             end)
         else
             win.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -1449,11 +1454,12 @@ do
             winCorner.CornerRadius = UDim.new(0, 22)
             sceneCorner.CornerRadius = UDim.new(0, 22)
             halo.Visible = true
-            -- windowed uses the cheap flat host too: rounded-corner clipping
-            -- (a CanvasGroup) cost far more FPS than it was worth
+            -- windowed: the rounded host (a CanvasGroup) clips the scene to the
+            -- window's rounded corners. With the lighter scene it costs nothing
+            -- measurable (87 fps rounded vs 86 flat).
             pcall(function()
-                UI.sceneHandle.frame.Parent = UI.sceneHosts.flat
-                UI.sceneHosts.flat.Visible, UI.sceneHosts.round.Visible = true, false
+                UI.sceneHandle.frame.Parent = UI.sceneHosts.round
+                UI.sceneHosts.flat.Visible, UI.sceneHosts.round.Visible = false, true
             end)
         end
     end
@@ -1714,21 +1720,41 @@ function F.kick(key)
 end
 env.__PS99HUB_KICK = F.kick
 env.__PS99HUB_LOOPS = loops
+-- Avoid launching every saved/enabled automation in the same frame. Several
+-- features scan the map or inventory, so a small concurrency cap prevents
+-- their work from piling up into visible game freezes.
+local activeLoopWorkers = 0
+local MAX_ACTIVE_LOOP_WORKERS = 3
+local nextLoopLaunch = 0
+local loopCursor = 1
 task.spawn(function()
     while alive() do
         local now = os.clock()
-        for _, l in ipairs(loops) do
-            if S.on[l.key] and now >= l.next and not l.running then
-                l.next = now + l.interval
-                l.running = true
-                task.spawn(function()
-                    local t0 = os.clock()
-                    local ok, err = pcall(l.fn)
-                    local spent = os.clock() - t0
-                    if spent > (l.worst or 0) then l.worst = spent end
-                    if not ok then setStatus(l.key, "error: " .. tostring(err):sub(1, 80)) end
-                    l.running = false
-                end)
+        if activeLoopWorkers < MAX_ACTIVE_LOOP_WORKERS and now >= nextLoopLaunch then
+            local total = #loops
+            for offset = 0, total - 1 do
+                local index = ((loopCursor + offset - 1) % total) + 1
+                local l = loops[index]
+                if S.on[l.key] and now >= l.next and not l.running then
+                    l.next = now + l.interval
+                    l.running = true
+                    activeLoopWorkers += 1
+                    nextLoopLaunch = now + 0.08
+                    loopCursor = (index % total) + 1
+                    task.spawn(function()
+                        local t0 = os.clock()
+                        local ok, err = pcall(l.fn)
+                        local spent = os.clock() - t0
+                        if spent > (l.worst or 0) then l.worst = spent end
+                        if not ok then setStatus(l.key, "error: " .. tostring(err):sub(1, 80)) end
+                        l.running = false
+                        activeLoopWorkers = math.max(0, activeLoopWorkers - 1)
+                    end)
+                    -- Spread launches across scheduler ticks instead of
+                    -- starting all due features together; rotate the scan
+                    -- start so slower intervals do not starve behind fast ones.
+                    break
+                end
             end
         end
         task.wait(0.1)
@@ -1947,6 +1973,77 @@ do
             return old(...)
         end)
     end
+    -- shared by every farm: send each of your pets to its own breakable with
+    -- the game's SetTarget, least-crowded first, and keep it there until it
+    -- breaks. `assigned` (euid -> model) persists between calls.
+    function F.drivePets(assigned, targets)
+        local pets = {}
+        local okB, list = pcall(G.PlayerPet.GetByPlayer, LocalPlayer)
+        if okB and type(list) == "table" then
+            for _, pet in pairs(list) do
+                if type(pet) == "table" and pet.euid then pets[#pets + 1] = { euid = pet.euid, pet = pet } end
+            end
+        end
+        if #pets == 0 then
+            for euid, pet in pairs(G.PlayerPet.GetAll()) do
+                local ok, own = pcall(function() return pet:BelongsToLocalPlayer() end)
+                if ok and own then pets[#pets + 1] = { euid = euid, pet = pet } end
+            end
+        end
+        if #targets == 0 or #pets == 0 then return #pets, 0 end
+        local isTarget, load = {}, {}
+        for _, b in ipairs(targets) do isTarget[b] = true load[b] = 0 end
+        for _, e in ipairs(pets) do
+            local cur = assigned[e.euid]
+            if cur and isTarget[cur] and cur.Parent then load[cur] += 1 end
+        end
+        local posCache = {}
+        local function posOf(b)
+            local p = posCache[b]
+            if p == nil then
+                local ok, bp = pcall(function() return b:GetPivot().Position end)
+                p = ok and bp or false
+                posCache[b] = p
+            end
+            return p
+        end
+        local join, changed = {}, false
+        for _, e in ipairs(pets) do
+            local cur = assigned[e.euid]
+            if not (cur and isTarget[cur] and cur.Parent) then
+                local okPos, petPos = pcall(function() return e.pet.cpet.primaryPart.Position end)
+                local best, bestLoad, bestD
+                for _, b in ipairs(targets) do
+                    local l = load[b]
+                    if not bestLoad or l <= bestLoad then
+                        local bp = okPos and posOf(b)
+                        local d = bp and (bp - petPos).Magnitude or 0
+                        if not bestLoad or l < bestLoad or d < bestD then best, bestLoad, bestD = b, l, d end
+                    end
+                end
+                if best then
+                    load[best] += 1
+                    assigned[e.euid] = best
+                    pcall(function() e.pet:SetTarget(best) end)
+                    join[e.euid] = best.Name
+                    changed = true
+                end
+            end
+        end
+        local present = {}
+        for _, e in ipairs(pets) do present[e.euid] = true end
+        for euid in pairs(assigned) do if not present[euid] then assigned[euid] = nil end end
+        if changed then pcall(G.Network.Fire, "Breakables_JoinPetBulk", join) end
+        pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", targets[math.random(#targets)].Name)
+        local busy = 0
+        for _, l in pairs(load) do if l > 0 then busy += 1 end end
+        return #pets, busy
+    end
+    function F.releasePets()
+        local okB, list = pcall(G.PlayerPet.GetByPlayer, LocalPlayer)
+        for _, pet in pairs(okB and type(list) == "table" and list or {}) do pcall(function() pet:ClearTarget() end) end
+    end
+
     local running = false
     function F.startFarm()
         if running then return end
@@ -2155,7 +2252,9 @@ do
         return T
     end
     -- farming first: these make the zone farm faster, the rest come after
-    local UPGRADE_ORDER = { "PumpkinCoins", "PumpkinDamage", "SpawnLuck", "RespawnSpeed", "EggLuck", "ChaseOdds", "StockSlots", "MerchantLuck" }
+    -- island farming is capped by how fast breakables respawn (pets already
+    -- clear them as they appear), so faster spawns come first, then coins
+    local UPGRADE_ORDER = { "RespawnSpeed", "PumpkinCoins", "SpawnLuck", "PumpkinDamage", "EggLuck", "ChaseOdds", "StockSlots", "MerchantLuck" }
 
     function Tycoon.plot()
         local m = mods()
@@ -2310,6 +2409,7 @@ do
             env.__PS99HUB_FARM_ON = true
             local section, slab, zoneName, lastTp, spot, eggName = nil, nil, nil, 0, nil, nil
             local hits, prefix = 0, nil
+            local assigned = {}
             local lootConn
             local lootFolder = G.THINGS:FindFirstChild("Lootbags")
             if lootFolder then
@@ -2328,7 +2428,10 @@ do
                         Tycoon.retarget = false
                         local idx
                         idx, section, slab, zoneName, eggName = Tycoon.bestZone()
-                        prefix = section and (section .. "_Zone") or nil
+                        -- exact area of YOUR island: "<Section>_Zone_<your plot>";
+                        -- other players' islands share the same prefix
+                        local _, myModel = Tycoon.plot()
+                        prefix = (section and myModel) and (section .. "_Zone_" .. myModel.Name) or nil
                         spot = slab and Tycoon.standSpot(slab, eggName) or nil
                         Tycoon.spot, Tycoon.eggName = spot, eggName
                         lastTp = 0
@@ -2346,23 +2449,16 @@ do
                     if prefix then
                         for _, b in ipairs(G.THINGS.Breakables:GetChildren()) do
                             local area = b:GetAttribute("AreaID")
-                            if area and area:sub(1, #prefix) == prefix then valid[#valid + 1] = b.Name end
+                            if b:IsA("Model") and area == prefix then valid[#valid + 1] = b end
                         end
                     end
-                    local pets = {}
-                    for id in pairs(G.PlayerPet.GetAll()) do pets[#pets + 1] = tostring(id) end
-                    if #valid > 0 and #pets > 0 then
-                        local map = {}
-                        for i, pet in ipairs(pets) do
-                            local target = valid[(i - 1) % #valid + 1]
-                            map[target] = map[target] or {}
-                            table.insert(map[target], pet)
-                        end
-                        pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", valid[math.random(#valid)])
-                        pcall(G.Network.Fire, "Breakables_JoinPetBulk", map)
+                    -- same fast targeting as Fast Farm: every pet on its own
+                    -- breakable via the game's SetTarget, kept until it breaks
+                    local petCount, busy = F.drivePets(assigned, valid)
+                    if #valid > 0 and petCount > 0 then
                         hits += 1
-                        if hits % 20 == 0 then
-                            setStatus("tycoonfarm", ("Farming %s  ·  %d breakables  ·  %d pets"):format(tostring(zoneName or section), #valid, #pets))
+                        if hits % 15 == 0 then
+                            setStatus("tycoonfarm", ("Farming %s  ·  %d pets on %d of %d breakables"):format(tostring(zoneName or section), petCount, busy, #valid))
                         end
                         task.wait(0.1)
                     else
@@ -2372,6 +2468,7 @@ do
                 end
             end
             if lootConn then lootConn:Disconnect() end
+            F.releasePets()
             env.__PS99HUB_FARM_ON = S.on.farm == true
             running = false
         end)
@@ -2379,6 +2476,7 @@ do
 end
 -- EQUIP BEST / ANTI AFK ----------------------------------------------
 loop("equipbest", 8, function()
+
     if G.PetCmds and pcall(G.PetCmds.EquipBest) then setStatus("equipbest", "Equipped your best pets  ·  " .. os.date("%H:%M")) end
 end)
 -- ANTI AFK (same as the Pet Dimensions hub): a real Space key press through
@@ -3137,33 +3235,53 @@ do
         return d and (d.huge or d.titanic or d.gargantuan) and true or false
     end
 
-    -- every wild pet worth a net right now, best first
-    local function candidates(Wild, plot, nets, ultras)
-        local minChance = (tonumber(Settings.values.wildMin) or 50) / 100
+    -- Remember each spawned pet object after its first throw so a miss is
+    -- not repeatedly targeted on later scans. A new spawn gets a new object.
+    local attemptedPets = {}
+
+    -- Huges always take priority. For other pets, sort by raw spawn chance
+    -- (lowest first), not net-adjusted chance. Net multipliers must not make
+    -- rare targets look common.
+    local function candidates(Wild, plot, nets, ultras, attempted)
         local caughtIds = {}
         pcall(function() caughtIds = plot:Save("CaughtIds") or {} end)
+        local all = Wild.All() or {}
+        for phys in pairs(attempted) do
+            local stillSpawned = false
+            for _, current in pairs(all) do
+                if current == phys then stillSpawned = true break end
+            end
+            if not stillSpawned then attempted[phys] = nil end
+        end
         local list = {}
-        for slot, phys in pairs(Wild.All() or {}) do
-            if type(phys) == "table" and phys.At and not phys.Catching and not phys.AttemptingCatch and not phys.SoldOut then
+        for slot, phys in pairs(all) do
+            if type(phys) == "table" and phys.At and not attempted[phys] and not phys.Catching and not phys.AttemptingCatch and not phys.SoldOut then
                 local entry = type(phys.Entry) == "table" and phys.Entry or {}
                 local huge = hugeTier(entry.P)
                 local net
                 if huge and ultras > 0 and S.on.wildultrahuge ~= false then net = "Ultra Pet Net"
                 elseif nets > 0 then net = "Pet Net" end
                 if net then
-                    local base = tonumber(phys.CatchChance) or 0
-                    local chance = math.min(1, base * netMult(net))
-                    if huge or chance >= minChance then
-                        local new = S.on.wildnew ~= false and not caughtIds[entry.P]
-                        local score = (huge and 1000 or 0) + (entry.S and 30 or 0) + (entry.R and 20 or 0) + (entry.G and 10 or 0)
-                            + (new and 5 or 0) + chance
-                        list[#list + 1] = { slot = slot, phys = phys, net = net, pet = entry.P or "?", chance = chance, huge = huge,
-                            variant = (entry.S and "Shiny " or "") .. (entry.R and "Rainbow " or (entry.G and "Golden " or "")), score = score, new = new }
-                    end
+                    local baseChance = tonumber(phys.CatchChance) or 0
+                    local displayChance = math.min(1, baseChance * netMult(net))
+                    local new = S.on.wildnew ~= false and not caughtIds[entry.P]
+                    local variantScore = (entry.S and 30 or 0) + (entry.R and 20 or 0) + (entry.G and 10 or 0)
+                    list[#list + 1] = {
+                        slot = slot, phys = phys, net = net, pet = entry.P or "?",
+                        rawChance = baseChance, chance = displayChance, huge = huge,
+                        variant = (entry.S and "Shiny " or "") .. (entry.R and "Rainbow " or (entry.G and "Golden " or "")),
+                        variantScore = variantScore, new = new,
+                    }
                 end
             end
         end
-        table.sort(list, function(a, b) return a.score > b.score end)
+        table.sort(list, function(a, b)
+            if a.huge ~= b.huge then return a.huge end
+            if a.rawChance ~= b.rawChance then return a.rawChance < b.rawChance end
+            if a.variantScore ~= b.variantScore then return a.variantScore > b.variantScore end
+            if a.new ~= b.new then return a.new end
+            return tostring(a.pet) < tostring(b.pet)
+        end)
         return list
     end
 
@@ -3193,16 +3311,15 @@ do
             if S.on.tycoonautonets then return setStatus("wildcatch", "Out of nets  ·  waiting for the tycoon to restock") end
             return setStatus("wildcatch", "Out of Pet Nets  ·  turn on Auto Buy Nets")
         end
-        local list = candidates(Wild, plot, nets, ultras)
+        local list = candidates(Wild, plot, nets, ultras, attemptedPets)
         if #list == 0 then
-            return setStatus("wildcatch", ("Nothing worth a net (%d%%+)  ·  %d nets, %d ultra  ·  caught %d"):format(
-                (tonumber(Settings.values.wildMin) or 50), nets, ultras, WildStats.caught))
+            return setStatus("wildcatch", ("No available wild pets  ·  %d nets, %d ultra  ·  caught %d"):format(
+                nets, ultras, WildStats.caught))
         end
         local lastText
         withTeleport(function(root)
             local here = list[1].phys.At
             local thrown = 0
-            local tries = {}
             local i = 1
             while i <= #list and thrown < 5 and S.on.wildcatch and alive() do
                 local c = list[i]
@@ -3213,10 +3330,11 @@ do
                     if wait > 0 then task.wait(wait) end
                 end
                 if c.phys.Catching or c.phys.SoldOut then i += 1 continue end
+                -- One attempt per individual spawned pet, including Huges.
+                attemptedPets[c.phys] = true
                 local caught, err = throwAt(plot, m, root, c)
                 thrown += 1
                 here = c.phys.At
-                tries[c.slot] = (tries[c.slot] or 0) + 1
                 WildStats.throws += 1
                 if caught == nil then
                     lastText = ("%s: %s"):format(c.pet, err)
@@ -3235,12 +3353,8 @@ do
                 else
                     WildStats.missed += 1
                     lastText = ("Missed %s%s (%d%%)"):format(c.variant, c.pet, c.chance * 100)
-                    -- huges get thrown at again until caught or gone; others move on
-                    if not (c.huge and tries[c.slot] < 25) then i += 1 end
-                    if c.huge and c.net == "Ultra Pet Net" and itemCount("Ultra Pet Net") == 0 then
-                        c.net = itemCount("Pet Net") > 0 and "Pet Net" or nil
-                        if not c.net then break end
-                    end
+                    -- This spawn has now had its single attempt. A later
+                    -- newly spawned Huge will still be prioritised normally.
                 end
             end
         end)
@@ -3979,15 +4093,15 @@ do
         if on then Tycoon.startFarm() end
     end)
     UI.status(s, "tycoonfarm", "Off")
-    UI.toggle(s, "tycoonupgrades", "Auto Token Upgrades", "Spends Pumpkin Tokens, coin and damage upgrades first", false)
+    UI.toggle(s, "tycoonupgrades", "Auto Token Upgrades", "Spends Pumpkin Tokens: Faster Spawns first, then coins and spawn luck", false)
     UI.status(s, "tycoonupgrades", "Off")
+
     UI.toggle(s, "cocoa", "Auto Hot Cocoa", "Keeps the coins, damage and luck cocoa boosts topped up", false)
     UI.status(s, "cocoa", "Off")
     UI.slider(s, "cocoaMinutes", "Cocoa minutes per top-up", 10, 120, 30, 10)
     s = UI.section(farm, "Tycoon wild pets", Color3.fromRGB(255, 170, 90))
-    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Huges first, then shiny / rainbow / golden, then new pets; chains nearby throws", false)
+    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Huges first, then the lowest catch-chance (rarest) pets; chains nearby throws", false)
     UI.status(s, "wildcatch", "Off")
-    UI.slider(s, "wildMin", "Only throw at catch chance % or higher", 5, 100, 50, 5)
     UI.toggle(s, "wildultrahuge", "Ultra Nets On Huges", "Ultra nets (x5) are used on huges and above only, never on normal pets", true)
     UI.toggle(s, "wildnew", "Prefer Pets Not Caught Yet", "Breaks ties toward pets missing from your collection", true)
     UI.toggle(s, "tycoonautonets", "Auto Buy Nets", "Turns on the tycoon's own net restock (uses Patch Coins)", false, function(on)
