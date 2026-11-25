@@ -717,6 +717,13 @@ local function itemId(item)
     local ok, id = pcall(function() return item:GetId() end)
     return ok and id or nil
 end
+local function diamonds()
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    for _, v in ipairs(ls and ls:GetChildren() or {}) do
+        if v.Name:find("Diamonds") then return tonumber(v.Value) or 0 end
+    end
+    return 0
+end
 local function inInstance()
     local ok, id = pcall(function() return G.InstancingCmds and G.InstancingCmds.GetInstanceID() end)
     return ok and id or nil
@@ -822,6 +829,27 @@ do
     end
     UI.new, UI.corner, UI.stroke, UI.pad, UI.label = new, corner, stroke, pad, label
 
+    -- glass: every see-through surface registers its base transparency so the
+    -- "Glass opacity" slider can scale them all at once
+    UI.glassItems = {}
+    UI.glassLevel = tonumber(Settings.values.glass) or 100
+    local function glassValue(base)
+        local k = UI.glassLevel / 100
+        return math.clamp(1 - (1 - base) * k, 0, 1)
+    end
+    function UI.glassAdd(obj)
+        local base = obj.BackgroundTransparency
+        UI.glassItems[#UI.glassItems + 1] = { obj = obj, base = base }
+        obj.BackgroundTransparency = glassValue(base)
+        return obj
+    end
+    function UI.setGlass(level)
+        UI.glassLevel = level
+        for i = #UI.glassItems, 1, -1 do
+            local g = UI.glassItems[i]
+            if g.obj.Parent then g.obj.BackgroundTransparency = glassValue(g.base) else table.remove(UI.glassItems, i) end
+        end
+    end
     -- PlayerGui on purpose: under gethui() the thread loses write access to
     -- the UI as soon as it calls back into the game's own modules
     local parent = LocalPlayer:WaitForChild("PlayerGui")
@@ -862,6 +890,7 @@ do
     local wash = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.82, ZIndex = 1 }, win)
     corner(wash, 22)
     UI.wash = wash
+    UI.glassAdd(wash)
     UI.sceneHandle = sceneHandle
 
     -- header
@@ -892,6 +921,7 @@ do
         local chip = new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -118 - (3 - i) * 136, 0, 20),
             Size = UDim2.fromOffset(128, 50), BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.55, ZIndex = 3 }, win)
         corner(chip, 12)
+        UI.glassAdd(chip)
         stroke(chip, THEME.stroke, 0.35)
         label(chip, { text = name, font = Enum.Font.GothamBold, size = 9, colour = THEME.muted,
             sz = UDim2.new(1, -20, 0, 14), pos = UDim2.fromOffset(12, 8), z = 4 })
@@ -915,6 +945,7 @@ do
     local sidebar = new("Frame", { Position = UDim2.fromOffset(18, 92), Size = UDim2.new(0, 188, 1, -110),
         BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.62, ZIndex = 2 }, win)
     corner(sidebar, 18)
+    UI.glassAdd(sidebar)
     stroke(sidebar, THEME.stroke, 0.5)
     local search = new("TextButton", { Position = UDim2.fromOffset(10, 10), Size = UDim2.new(1, -20, 0, 30),
         BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.55, Text = "Search everything   `", TextXAlignment = Enum.TextXAlignment.Left,
@@ -932,6 +963,7 @@ do
     local surface = new("Frame", { Position = UDim2.fromOffset(220, 92), Size = UDim2.new(1, -238, 1, -110),
         BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.66, ZIndex = 2 }, win)
     corner(surface, 18)
+    UI.glassAdd(surface)
     stroke(surface, THEME.stroke, 0.5)
     local caption = label(surface, { text = "", font = Enum.Font.GothamBlack, size = 14, colour = THEME.accent,
         sz = UDim2.new(1, -300, 0, 24), pos = UDim2.fromOffset(22, 14), z = 3 })
@@ -1038,12 +1070,35 @@ do
         stroke(card, THEME.stroke, 0.45)
         pad(card, 12, 12, 10, 12)
         new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, card)
-        local head = new("Frame", { LayoutOrder = 0, Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, ZIndex = 4 }, card)
+        UI.glassAdd(card)
+        local head = new("TextButton", { LayoutOrder = 0, Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1, Text = "",
+            AutoButtonColor = false, ZIndex = 4 }, card)
         local dot = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 2, 0.5, 0), Size = UDim2.fromOffset(7, 7),
             BackgroundColor3 = dotColour or THEME.accent, ZIndex = 5 }, head)
         corner(dot, 4)
         label(head, { text = heading:upper(), font = Enum.Font.GothamBold, size = 12, colour = THEME.text,
-            pos = UDim2.fromOffset(16, 0), sz = UDim2.new(1, -16, 1, 0), z = 5 })
+            pos = UDim2.fromOffset(16, 0), sz = UDim2.new(1, -40, 1, 0), z = 5 })
+        local chevron = label(head, { text = "-", font = Enum.Font.GothamBold, size = 14, colour = THEME.muted,
+            align = Enum.TextXAlignment.Center, anchor = Vector2.new(1, 0), pos = UDim2.new(1, 0, 0, 0), sz = UDim2.fromOffset(22, 22), z = 5 })
+        -- click the heading to fold the card away; remembered between runs
+        local foldKey = "fold_" .. tab.title .. "_" .. heading
+        local folded = Settings.values[foldKey] == true
+        local function applyFold(animate)
+            for _, child in ipairs(card:GetChildren()) do
+                if child:IsA("GuiObject") and child ~= head then child.Visible = not folded end
+            end
+            chevron.Text = folded and "+" or "-"
+        end
+        head.MouseButton1Click:Connect(function()
+            folded = not folded
+            Settings.values[foldKey] = folded or nil
+            persist()
+            applyFold(true)
+        end)
+        card.ChildAdded:Connect(function(child)
+            if folded and child:IsA("GuiObject") and child ~= head then task.defer(function() child.Visible = false end) end
+        end)
+        task.defer(applyFold, false)
         return { frame = card, n = 0, tab = tab }
     end
 
@@ -1073,18 +1128,39 @@ do
         local row = new("TextButton", { LayoutOrder = section.n, Size = UDim2.new(1, 0, 0, desc and 46 or 36),
             BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.62, Text = "", AutoButtonColor = false, ZIndex = 4 }, section.frame)
         corner(row, 10)
+        UI.glassAdd(row)
         local rowStroke = stroke(row, THEME.stroke, 0.7)
         local bar = new("Frame", { Position = UDim2.new(0, 6, 0, 8), Size = UDim2.new(0, 3, 1, -16), BackgroundColor3 = THEME.on,
             BackgroundTransparency = 1, ZIndex = 5 }, row)
         corner(bar, 2)
         local name = label(row, { text = title, font = Enum.Font.GothamBold, size = 13, colour = THEME.muted,
-            sz = UDim2.new(1, -90, 0, 18), pos = UDim2.fromOffset(16, desc and 6 or 9), z = 5 })
+            sz = UDim2.new(1, -110, 0, 18), pos = UDim2.fromOffset(16, desc and 6 or 9), z = 5 })
         local sub
         if desc then
             sub = label(row, { text = desc, font = Enum.Font.Gotham, size = 11, colour = THEME.muted,
-                sz = UDim2.new(1, -90, 0, 14), pos = UDim2.fromOffset(16, 25), z = 5 })
+                sz = UDim2.new(1, -110, 0, 14), pos = UDim2.fromOffset(16, 25), z = 5 })
             sub.TextTransparency = 0.2
         end
+        -- pin: a small diamond; pinned switches also show up on the Pinned tab
+        local pinBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -62, 0.5, 0), Size = UDim2.fromOffset(22, 22),
+            BackgroundTransparency = 1, Text = "", ZIndex = 6 }, row)
+        local gem = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(9, 9),
+            Rotation = 45, BackgroundColor3 = THEME.gold, BackgroundTransparency = 1, ZIndex = 6 }, pinBtn)
+        corner(gem, 2)
+        local gemStroke = stroke(gem, THEME.muted, 0.4, 1.2)
+        local function paintPin()
+            local pinned = Settings.values["pin_" .. key] == true
+            gem.BackgroundTransparency = pinned and 0 or 1
+            gemStroke.Color = pinned and THEME.gold or THEME.muted
+            gemStroke.Transparency = pinned and 0 or 0.4
+        end
+        paintPin()
+        pinBtn.MouseButton1Click:Connect(function()
+            Settings.values["pin_" .. key] = not (Settings.values["pin_" .. key] == true) or nil
+            persist()
+            paintPin()
+            if UI.refreshPins then UI.refreshPins() end
+        end)
         local track = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(42, 22),
             BackgroundColor3 = THEME.surface, ZIndex = 5 }, row)
         corner(track, 11)
@@ -1095,7 +1171,7 @@ do
         local squash = new("UIScale", {}, knob)
         local state = Settings.toggles[key]
         if state == nil then state = default == true end
-        local handle = { key = key, title = title, tab = tab, row = row }
+        local handle = { key = key, title = title, desc = desc, tab = tab, row = row, paintPin = paintPin }
         local function paint(animate)
             local target = state and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
             if animate then
@@ -1188,7 +1264,83 @@ do
         UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
         UIS.InputChanged:Connect(function(i) if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then fromMouse() end end)
         task.defer(setValue, value, false)
+        UI.glassAdd(row)
         return { get = function() return value end }
+    end
+
+    -- a text input row; secret = only show the start of what is saved
+    function UI.textbox(section, key, title, placeholder, secret)
+        section.n += 1
+        local row = new("Frame", { LayoutOrder = section.n, Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = THEME.panel,
+            BackgroundTransparency = 0.62, ZIndex = 4 }, section.frame)
+        corner(row, 10)
+        UI.glassAdd(row)
+        label(row, { text = title, font = Enum.Font.GothamBold, size = 13, colour = THEME.text, sz = UDim2.new(1, -32, 0, 18), pos = UDim2.fromOffset(16, 6), z = 5 })
+        local box = new("TextBox", { Position = UDim2.fromOffset(12, 28), Size = UDim2.new(1, -24, 0, 24), BackgroundColor3 = THEME.bg,
+            BackgroundTransparency = 0.35, ClearTextOnFocus = false, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = THEME.text,
+            PlaceholderText = placeholder or "", PlaceholderColor3 = THEME.muted, Text = "", TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 5 }, row)
+        corner(box, 8)
+        stroke(box, THEME.stroke, 0.5)
+        pad(box, 8, 8)
+        local function shown()
+            local v = Settings.values[key]
+            if type(v) ~= "string" or v == "" then return "" end
+            if secret then return v:sub(1, 45) .. (#v > 45 and "  ••••••" or "") end
+            return v
+        end
+        box.Text = shown()
+        box.Focused:Connect(function() box.Text = type(Settings.values[key]) == "string" and Settings.values[key] or "" end)
+        box.FocusLost:Connect(function()
+            local v = box.Text:gsub("^%s+", ""):gsub("%s+$", "")
+            Settings.values[key] = v ~= "" and v or nil
+            persist()
+            box.Text = shown()
+        end)
+        return box
+    end
+
+    -- a key binding row: click it, press a key, done (Backspace clears)
+    UI.binds = {}
+    function UI.keybind(section, key, title, default)
+        section.n += 1
+        local row = new("TextButton", { LayoutOrder = section.n, Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = THEME.panel,
+            BackgroundTransparency = 0.62, Text = "", AutoButtonColor = false, ZIndex = 4 }, section.frame)
+        corner(row, 10)
+        UI.glassAdd(row)
+        label(row, { text = title, font = Enum.Font.GothamBold, size = 13, colour = THEME.text,
+            sz = UDim2.new(1, -150, 0, 18), pos = UDim2.fromOffset(16, 9), z = 5 })
+        local cap = new("TextLabel", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(0, 24),
+            AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.2, Font = Enum.Font.GothamBold,
+            TextSize = 11, TextColor3 = THEME.accent, Text = "", ZIndex = 5 }, row)
+        corner(cap, 8)
+        stroke(cap, THEME.accent, 0.5)
+        pad(cap, 10, 10)
+        local function current()
+            local name = Settings.values["key_" .. key]
+            if name == false or name == "None" then return nil end
+            local ok, code = pcall(function() return Enum.KeyCode[name or default] end)
+            return ok and code or nil
+        end
+        local function paint() local k = current() cap.Text = k and k.Name:upper() or "NONE" end
+        local listening = false
+        row.MouseButton1Click:Connect(function()
+            if listening then return end
+            listening = true
+            cap.Text = "PRESS A KEY..."
+            local conn
+            conn = UIS.InputBegan:Connect(function(input)
+                if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+                conn:Disconnect()
+                Settings.values["key_" .. key] = input.KeyCode == Enum.KeyCode.Backspace and "None" or input.KeyCode.Name
+                persist()
+                paint()
+                task.delay(0.2, function() listening = false end)
+            end)
+        end)
+        paint()
+        UI.binds[key] = { get = current, busy = function() return listening end }
+        return UI.binds[key]
     end
 
     -- toasts -----------------------------------------------------------
@@ -1196,8 +1348,13 @@ do
         BackgroundTransparency = 1 }, gui)
     new("UIListLayout", { Padding = UDim.new(0, 8), HorizontalAlignment = Enum.HorizontalAlignment.Right, SortOrder = Enum.SortOrder.LayoutOrder }, toastStack)
     local toastN = 0
+    UI.history = {}
     function UI.toast(titleText, body, colour)
         colour = colour or THEME.accent
+        table.insert(UI.history, 1, { title = titleText, body = body, colour = colour, at = os.date("%H:%M:%S") })
+        while #UI.history > 30 do table.remove(UI.history) end
+        UI.unread = (UI.unread or 0) + 1
+        if UI.onToast then pcall(UI.onToast) end
         toastN -= 1
         local card = new("Frame", { LayoutOrder = toastN, Size = UDim2.fromOffset(290, 58), BackgroundColor3 = THEME.bg }, toastStack)
         corner(card, 12)
@@ -1247,13 +1404,14 @@ do
     end
     applyFull()
     scale:GetPropertyChangedSignal("Scale"):Connect(applyFull)
-    fullBtn.MouseButton1Click:Connect(function()
+    local function flipFull()
         fullscreen = not fullscreen
         Settings.values.fullscreen = fullscreen
         persist()
         applyFull()
-    end)
-    UI.toggleFullscreen = function() fullBtn:Activate() end
+    end
+    fullBtn.MouseButton1Click:Connect(flipFull)
+    UI.toggleFullscreen = flipFull
 
     local curtain = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = THEME.bg, BackgroundTransparency = 1, ZIndex = 200 }, win)
     corner(curtain, 22)
@@ -1470,7 +1628,10 @@ do
             elseif input.KeyCode == Enum.KeyCode.Escape then close() end
             return
         end
-        if input.KeyCode == Enum.KeyCode.Backquote and not UIS:GetFocusedTextBox() then open() end
+        local bind = UI.binds and UI.binds.palette
+        if bind and bind.busy() then return end
+        local key = bind and bind.get() or (not bind and Enum.KeyCode.Backquote)
+        if key and input.KeyCode == key and not UIS:GetFocusedTextBox() then open() end
     end)
     UI.searchButton.MouseButton1Click:Connect(open)
     UI.searchChip.MouseButton1Click:Connect(open)
@@ -1554,6 +1715,7 @@ do
         end
         return math.max(0, math.floor(amount / S.shrink))
     end
+    F.nearestEgg = nearestEgg
     local running = false
     function F.startHatch()
         if running then return end
@@ -2322,7 +2484,6 @@ loop("rainbow", 10, function()
     end
     setStatus("rainbow", ("%d rainbow made this session"):format(S.counts.rainbow))
 end)
-
 -- PROGRESS -------------------------------------------------------------
 loop("zones", 5, function()
     if inInstance() or not G.ZoneCmds then return setStatus("zones", "Zones are bought in the main world") end
@@ -2347,6 +2508,475 @@ loop("rebirth", 30, function()
     setStatus("rebirth", ok and ("Rebirth requested: " .. tostring(id)) or tostring(msg))
 end)
 
+-- EGG CHANCES ------------------------------------------------------------
+-- Uses the game's own GetProbabilityMap, so every number already includes
+-- your luck from potions, enchants, gamepasses and event upgrades.
+local Chances = { eggId = nil, map = {}, luck = 0, pinned = nil }
+do
+    local function petInfo(id)
+        local ok, d = pcall(function() return G.Directory.Pets[id] end)
+        return ok and d or nil
+    end
+    Chances.petInfo = petInfo
+    function Chances.eggsInRange()
+        local list, root = {}, hrp()
+        if not root then return list end
+        pcall(function()
+            for _, e in pairs(G.CustomEggsCmds.All()) do
+                local okH, h = pcall(function() return e:IsHatchable() end)
+                if okH and h and (e._position - root.Position).Magnitude < 160 then list[#list + 1] = e._id end
+            end
+        end)
+        local folder = G.THINGS:FindFirstChild("Eggs")
+        for _, m in ipairs(folder and folder:GetChildren() or {}) do
+            local okP, pos = pcall(function() return m:GetPivot().Position end)
+            local okD, dir = pcall(function() return G.Directory.Eggs[m.Name] end)
+            if okP and okD and dir and (pos - root.Position).Magnitude < 160 and not table.find(list, m.Name) then list[#list + 1] = m.Name end
+        end
+        return list
+    end
+    function Chances.currentEgg()
+        if Chances.pinned then return Chances.pinned end
+        if S.on.hatch and S.target and S.target ~= "-" then return S.target end
+        local egg = F.nearestEgg and F.nearestEgg()
+        return egg and egg.id or nil
+    end
+    function Chances.refresh()
+        local id = Chances.currentEgg()
+        Chances.eggId = id
+        if not id then Chances.map, Chances.rows = {}, {} return end
+        local okM, map = pcall(G.EggCmds.GetProbabilityMap, id)
+        local okL, luck = pcall(G.EggCmds.ComputeLuckBoost, id)
+        Chances.map = okM and type(map) == "table" and map or {}
+        Chances.luck = okL and tonumber(luck) or 0
+        local rows = {}
+        for pet, p in pairs(Chances.map) do
+            local d = petInfo(pet)
+            rows[#rows + 1] = { id = pet, p = p, huge = d and d.huge, titanic = d and (d.titanic or d.gargantuan), thumb = d and d.thumbnail }
+        end
+        table.sort(rows, function(a, b) return a.p > b.p end)
+        Chances.rows = rows
+        local okD, dir = pcall(function() return G.Directory.Eggs[id] end)
+        Chances.dir = okD and dir or nil
+    end
+    function Chances.perHatch()
+        if S.perHatch and S.perHatch > 0 then return S.perHatch end
+        local ok, n = pcall(function() return G.EggCmds.GetMaxHatch(Chances.dir) end)
+        return ok and tonumber(n) or 1
+    end
+end
+
+-- HATCH TRACKER / HUGE ALERTS -------------------------------------------
+-- Watches the pet inventory. Only huges, titanics and gargantuans raise an
+-- alert (toast + log + Discord webhook if you set one up).
+local Tracker = { log = {}, seen = nil, hatched = {}, huges = 0, rares = 0 }
+
+-- DISCORD WEBHOOK ----------------------------------------------------------
+local Webhook = {}
+do
+    local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
+    function Webhook.url()
+        local u = Settings.values.webhookUrl
+        if type(u) ~= "string" then return nil end
+        u = u:gsub("^%s+", ""):gsub("%s+$", "")
+        if u:match("^https://discord%.com/api/webhooks/") or u:match("^https://discordapp%.com/api/webhooks/")
+            or u:match("^https://ptb%.discord%.com/api/webhooks/") or u:match("^https://canary%.discord%.com/api/webhooks/") then
+            return u
+        end
+        return nil
+    end
+    -- the pet picture: ask Roblox for a real image URL for the thumbnail id
+    local function imageUrl(assetId)
+        local id = tostring(assetId or ""):match("%d+")
+        if not id or not httpRequest then return nil end
+        local ok, res = pcall(httpRequest, { Url = ("https://thumbnails.roblox.com/v1/assets?assetIds=%s&size=420x420&format=Png"):format(id), Method = "GET" })
+        if not ok or type(res) ~= "table" or not res.Body then return nil end
+        local okJ, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+        local entry = okJ and type(data) == "table" and type(data.data) == "table" and data.data[1]
+        return entry and entry.imageUrl or nil
+    end
+    function Webhook.send(info)
+        local url = Webhook.url()
+        if not url then return false, "no webhook set" end
+        if not httpRequest then return false, "this executor has no http request function" end
+        local colour = info.tag == "TITANIC" and 0xFF78E6 or (info.tag == "GARGANTUAN" and 0xFF6E6E or 0xFFD33D)
+        local fields = {
+            { name = "Pet", value = info.name, inline = true },
+            { name = "Amount", value = tostring(info.amount or 1), inline = true },
+        }
+        if info.egg then fields[#fields + 1] = { name = "Egg", value = info.egg, inline = true } end
+        if info.chance then fields[#fields + 1] = { name = "Chance", value = "1 in " .. commas(1 / info.chance), inline = true } end
+        local okH, lifetime = pcall(function() return save().EggsHatched end)
+        if okH and lifetime then fields[#fields + 1] = { name = "Eggs hatched", value = commas(lifetime), inline = true } end
+        fields[#fields + 1] = { name = "Huges this session", value = tostring(Tracker.huges), inline = true }
+        local embed = {
+            title = info.tag .. " HATCHED!",
+            description = ("**%s** just got **%s**"):format(LocalPlayer.Name, info.name),
+            color = colour,
+            fields = fields,
+            footer = { text = "PS99 Hub" },
+            timestamp = DateTime.now():ToIsoDate(),
+        }
+        local img = imageUrl(info.thumb)
+        if img then embed.thumbnail = { url = img } end
+        local body = { username = "PS99 Hub", embeds = { embed } }
+        if S.on.webhookping then body.content = "@everyone" end
+        local ok, res = pcall(httpRequest, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
+        if not ok then return false, tostring(res) end
+        local code = type(res) == "table" and tonumber(res.StatusCode) or 0
+        if code >= 200 and code < 300 then return true end
+        return false, ("Discord answered %s"):format(tostring(code))
+    end
+end
+env.__PS99HUB_WEBHOOK = Webhook
+do
+    local function snapshot()
+        local counts = {}
+        local ok, inv = pcall(function() return save().Inventory.Pet end)
+        for _, pet in pairs(ok and inv or {}) do
+            if type(pet) ~= "table" or type(pet.id) ~= "string" then continue end
+            local key = pet.id .. "|" .. tostring(pet.pt or 0) .. "|" .. tostring(pet.sh or false)
+            counts[key] = (counts[key] or 0) + (pet._am or 1)
+        end
+        return counts
+    end
+    local function push(text, colour)
+        table.insert(Tracker.log, 1, { text = text, colour = colour, at = os.date("%H:%M:%S") })
+        while #Tracker.log > 8 do table.remove(Tracker.log) end
+    end
+    Tracker.push = push
+    loop("hatchalerts", 1, function()
+        local now = snapshot()
+        if not Tracker.seen then Tracker.seen = now return end
+
+        for key, amount in pairs(now) do
+            local gained = amount - (Tracker.seen[key] or 0)
+            if gained > 0 then
+                local id, pt, sh = key:match("^(.-)|(%d+)|(%a+)$")
+                Tracker.hatched[id] = (Tracker.hatched[id] or 0) + gained
+                local d = Chances.petInfo(id)
+                local variant = (pt == "2" and "Rainbow " or pt == "1" and "Golden " or "") .. (sh == "true" and "Shiny " or "")
+                local p = Chances.map[id]
+                if d and (d.huge or d.titanic or d.gargantuan) then
+                    Tracker.huges += gained
+                    local tag = d.gargantuan and "GARGANTUAN" or (d.titanic and "TITANIC" or "HUGE")
+                    push(("%s  %s%s x%d"):format(tag, variant, id, gained), THEME.gold)
+                    UI.toast(tag .. " HATCHED!", variant .. id, THEME.gold)
+                    if S.on.webhook and Webhook.url() then
+                        local info = { tag = tag, name = variant .. id, amount = gained, egg = Chances.eggId, chance = p,
+                            thumb = (pt == "1" and d.goldenThumbnail) or d.thumbnail }
+                        task.spawn(function()
+                            local ok, err = Webhook.send(info)
+                            setStatus("webhook", ok and ("Sent %s to Discord  ·  %s"):format(info.name, os.date("%H:%M")) or ("Webhook failed: " .. tostring(err)))
+                        end)
+                    end
+                end
+            end
+        end
+        Tracker.seen = now
+        setStatus("hatchalerts", ("%d huge%s this session"):format(Tracker.huges, Tracker.huges == 1 and "" or "s"))
+    end)
+end
+
+-- SLOTS (equip + egg) ----------------------------------------------------
+
+local function slotBuy(remote, arg, machineName)
+    local ok, msg = invoke(remote, arg)
+    if ok then return true end
+    -- some machines want you standing at them: hop over in this world and back
+    if tostring(msg):lower():find("far") and not inInstance() then
+        local pad
+        local map = workspace:FindFirstChild("Map")
+        for _, d in ipairs(map and map:GetDescendants() or {}) do
+            if d.Name == machineName and d:IsA("Model") then pad = d:FindFirstChild("Pad") or d:FindFirstChildWhichIsA("BasePart", true) break end
+        end
+        if pad then
+            local result
+            withTeleport(function(root)
+                root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
+                task.wait(0.6)
+                result = { invoke(remote, arg) }
+            end)
+            if result and result[1] then return true end
+            msg = result and result[2] or msg
+        end
+    end
+    return false, msg
+end
+loop("equipslots", 15, function()
+    local sv = save()
+    local nextSlot = (sv.PetSlotsPurchased or 0) + 1
+    local okMax, max = pcall(function() return require(RS.Library.Util.RanksUtil).GetMaxEquipSlots() end)
+    if okMax and type(max) == "number" and nextSlot > max then return setStatus("equipslots", ("All %d slots for your rank are bought"):format(max)) end
+    local okP, price = pcall(function() return require(RS.Library.Balancing).CalcPetSlotPrice(nextSlot) end)
+    price = okP and tonumber(price) or math.huge
+    local reserve = (tonumber(Settings.values.slotReserve) or 2) * 1e6
+    if diamonds() - price < reserve then
+        return setStatus("equipslots", ("Slot %d costs %s  ·  keeping %s diamonds"):format(nextSlot, short(price), short(reserve)))
+    end
+    local ok, msg = slotBuy("EquipSlotsMachine_RequestPurchase", nextSlot, "EquipSlotsMachine")
+    if ok then UI.toast("EQUIP SLOT BOUGHT", ("Slot %d"):format(nextSlot), THEME.good) end
+    setStatus("equipslots", ok and ("Bought equip slot %d for %s"):format(nextSlot, short(price)) or ("Slot %d: %s"):format(nextSlot, tostring(msg)))
+end)
+loop("eggslots", 15, function()
+    local sv = save()
+    local have = sv.EggSlotsPurchased or 0
+    local okB, bundles = pcall(function() return require(RS.Library.Util.EggSlotBundles).All() end)
+    if not okB then return setStatus("eggslots", "Egg slot list unavailable") end
+    local nextB
+    for _, b in pairs(bundles) do if b.Start == have + 1 then nextB = b end end
+    if not nextB then return setStatus("eggslots", "Every egg slot is bought") end
+    local cost = 0
+    for m = nextB.Start, nextB.End do cost += require(RS.Library.Balancing).CalcEggSlotPrice(m) end
+    local reserve = (tonumber(Settings.values.slotReserve) or 2) * 1e6
+    if diamonds() - cost < reserve then
+        return setStatus("eggslots", ("Slots %d-%d cost %s  ·  keeping %s diamonds"):format(nextB.Start, nextB.End, short(cost), short(reserve)))
+    end
+    local ok, msg = slotBuy("EggHatchSlotsMachine_RequestPurchase", nextB.End, "EggHatchSlotsMachine")
+    if ok then UI.toast("EGG SLOTS BOUGHT", ("Now hatching %d at once"):format(nextB.End), THEME.good) end
+    setStatus("eggslots", ok and ("Bought egg slots %d-%d"):format(nextB.Start, nextB.End) or ("Slots %d-%d: %s"):format(nextB.Start, nextB.End, tostring(msg)))
+end)
+
+-- VENDING MACHINES (this world only) ------------------------------------
+loop("vending", 60, function()
+    if inInstance() then return setStatus("vending", "Vending machines are in the main world") end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return end
+    local sv = save()
+    local wantDiamond = S.on.vendingdiamonds
+    local stops = {}
+    for id, dir in pairs(G.Directory.VendingMachines) do
+        local stock = sv.VendingStocks[id] or 0
+        if stock > 0 and (dir.CurrencyType ~= "Diamonds" or wantDiamond) then
+            for _, d in ipairs(map:GetDescendants()) do
+                if d.Name == dir.MachineName and d:IsA("Model") then
+                    local pad = d:FindFirstChild("Pad") or d:FindFirstChildWhichIsA("BasePart", true)
+                    if pad then stops[#stops + 1] = { id = id, pad = pad, stock = stock } end
+                    break
+                end
+            end
+        end
+    end
+    if #stops == 0 then return setStatus("vending", "Nothing in stock nearby  ·  restocks over time") end
+    local bought = 0
+    withTeleport(function(root)
+        for _, s in ipairs(stops) do
+            if not S.on.vending then break end
+            root.CFrame = CFrame.new(s.pad.Position + Vector3.new(0, 4, 0))
+            task.wait(0.6)
+            local ok = invoke("VendingMachines_Purchase", s.id, math.min(3, s.stock))
+            if not ok then ok = invoke("VendingMachines_Purchase", s.id, 1) end
+            if ok then bought += 1 end
+            task.wait(0.3)
+        end
+    end)
+    setStatus("vending", ("Bought from %d machine%s  ·  %s"):format(bought, bought == 1 and "" or "s", os.date("%H:%M")))
+end)
+
+-- TYCOON WILD PETS ---------------------------------------------------------
+-- Wild pets roam the island with a catch chance on each. The server only
+-- accepts a throw from near the pet's spawn spot (phys.At), so each catch
+-- hops over under the teleport lock (the zone farm waits) and comes back.
+local function itemCount(id)
+    local n = 0
+    for _, item in pairs(inventoryItems()) do
+        if itemId(item) == id then n += (item:GetAmount() or 0) end
+    end
+    return n
+end
+loop("wildcatch", 3, function()
+    local plot, _, m = Tycoon.plot()
+    if not plot then return setStatus("wildcatch", "Only works inside the Pumpkin Tycoon") end
+    local okW, Wild = pcall(m.Cmds.Feature, "Wild")
+    if not (okW and Wild) then return setStatus("wildcatch", "Wild pets unlock with part 2 of the tycoon") end
+    local nets, ultras = itemCount("Pet Net"), itemCount("Ultra Pet Net")
+    if nets + ultras == 0 then return setStatus("wildcatch", "Out of Pet Nets  ·  turn on Auto Buy Nets") end
+    local minChance = (tonumber(Settings.values.wildMin) or 50) / 100
+    local best, bestScore
+    for slot, phys in pairs(Wild.All() or {}) do
+        if type(phys) == "table" and phys.At and not phys.Catching and not phys.AttemptingCatch and not phys.SoldOut then
+            local chance = tonumber(phys.CatchChance) or 0
+            local entry = type(phys.Entry) == "table" and phys.Entry or {}
+            local d = Chances.petInfo(entry.P or "")
+            local special = d and (d.huge or d.titanic)
+            local useUltra = ultras > 0 and S.on.wildultra and (special or chance < minChance)
+            local effective = useUltra and math.min(1, chance * 5) or chance
+            if effective >= minChance or special then
+                local score = (special and 10 or 0) + effective + (entry.R and 0.5 or 0) + (entry.G and 0.2 or 0) + (entry.S and 1 or 0)
+                if not bestScore or score > bestScore then
+                    best, bestScore = { slot = slot, phys = phys, net = useUltra and "Ultra Pet Net" or "Pet Net", pet = entry.P, chance = chance }, score
+                end
+            end
+        end
+    end
+    if not best then return setStatus("wildcatch", ("No wild pet at %d%%+ right now  ·  %d nets"):format(minChance * 100, nets)) end
+    if best.net == "Pet Net" and nets == 0 then best.net = "Ultra Pet Net" end
+    local result
+    withTeleport(function(root)
+        root.CFrame = CFrame.new(best.phys.At + Vector3.new(3, 3, 0))
+        task.wait(0.8)
+        result = { pcall(function() return plot:Invoke(m.Types.NET.CatchWild, best.slot, best.net) end) }
+        -- the server can lag a beat behind the hop: one retry from right on top of it
+        if result[1] and result[2] ~= true and tostring(result[3]):find("closer") then
+            root.CFrame = CFrame.new(best.phys.At + Vector3.new(0, 3, 0))
+            task.wait(1)
+            result = { pcall(function() return plot:Invoke(m.Types.NET.CatchWild, best.slot, best.net) end) }
+        end
+        task.wait(0.4)
+    end)
+    if result and result[1] and result[2] == true then
+        local outcome = type(result[4]) == "table" and (result[4].outcome or result[4].Outcome) or nil
+        local caught = tostring(outcome):lower() == "caught"
+        S.counts.wild = (S.counts.wild or 0) + 1
+        S.counts.wildCaught = (S.counts.wildCaught or 0) + (caught and 1 or 0)
+        if caught then UI.toast("WILD PET CAUGHT", ("%s  ·  %d%% throw"):format(tostring(best.pet), best.chance * 100), THEME.good) end
+        setStatus("wildcatch", ("%s %s (%d%%)  ·  caught %d of %d this session"):format(caught and "Caught" or "Missed", tostring(best.pet), best.chance * 100, S.counts.wildCaught, S.counts.wild))
+        task.wait(2.5)
+    else
+        setStatus("wildcatch", ("%s: %s"):format(tostring(best.pet), tostring(result and (result[3] or result[2]) or "no answer")))
+    end
+end)
+
+-- EXTRA CLAIMS -------------------------------------------------------------
+loop("extraclaims", 120, function()
+    local got = {}
+    for _, name in ipairs({ "WelcomeBack: Claim", "Exclusive Daycare: Claim", "Transferring_ClaimAll" }) do
+        if invoke(name) then got[#got + 1] = name:match("^[^:_]+") end
+        task.wait(0.3)
+    end
+    fire("DiamondParty_Claim")
+    setStatus("extraclaims", #got > 0 and ("Claimed " .. table.concat(got, ", ")) or ("Nothing waiting  ·  checked " .. os.date("%H:%M")))
+end)
+
+-- SPINNY WHEEL (main world) -------------------------------------------------
+loop("spinwheel", 20, function()
+    if inInstance() then return setStatus("spinwheel", "The wheel is in the main world spawn") end
+    local tickets = itemCount("Spinny Wheel Ticket")
+    if tickets == 0 then return setStatus("spinwheel", "No Spinny Wheel Tickets left") end
+    local map = workspace:FindFirstChild("Map")
+    local pad
+    for _, d in ipairs(map and map:GetDescendants() or {}) do
+        if d:IsA("Model") and d.Name:find("SpinnyWheel") then pad = d:FindFirstChild("Pad") or d:FindFirstChildWhichIsA("BasePart", true) break end
+    end
+    local spun, msg = 0, nil
+    local function spinSome()
+        for _ = 1, math.min(5, tickets) do
+            local ok, m2 = invoke("Spinny Wheel: Request Spin", "StarterWheel")
+            if not ok then msg = m2 break end
+            spun += 1
+            task.wait(5.5)
+        end
+    end
+    spinSome()
+    if spun == 0 and pad then withTeleport(function(root) root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0)) task.wait(0.8) spinSome() end) end
+    setStatus("spinwheel", spun > 0 and ("Spun %d times  ·  %d tickets left"):format(spun, tickets - spun) or ("Can't spin: " .. tostring(msg)))
+end)
+-- DAYCARE ENROLL -----------------------------------------------------------
+-- Never touches your best pets: every pet type that makes your top team
+-- (strongest copies up to your equip limit) or is equipped right now is off
+-- limits. From what is left it picks ONE stack big enough to fill every free
+-- slot by itself, the biggest stack first, so the slots fill with fodder.
+loop("daycareenroll", 30, function()
+    if not G.DaycareCmds then return end
+    local okM, max = pcall(G.DaycareCmds.GetMaxSlots)
+    local okU, used = pcall(G.DaycareCmds.GetUsedSlots)
+    if not (okM and okU) then return end
+    local free = (max or 0) - (used or 0)
+    if free <= 0 then return setStatus("daycareenroll", ("All %d slots busy  ·  claims refill them"):format(max)) end
+    local okL, DL = pcall(function() return require(RS.Library.Modules.DaycareLoot) end)
+    if not okL then return setStatus("daycareenroll", "Daycare rules unavailable") end
+
+    local stacks = {}
+    for _, it in pairs(inventoryItems()) do
+        local ok, info = pcall(function()
+            if not it:IsA("Pet") then return nil end
+            return { item = it, uid = it:GetUID(), id = it:GetId(), amount = it:GetAmount(), power = it:CalculatePower() }
+        end)
+        if ok and info then stacks[#stacks + 1] = info end
+    end
+    -- your best team: walk copies strongest first until the equip limit is filled
+    local protected = {}
+    for _, p in pairs(G.PlayerPet.GetAll()) do if p.id then protected[p.id] = true end end
+    table.sort(stacks, function(a, b) return a.power > b.power end)
+    local teamSize = tonumber(save().MaxPetsEquipped) or 50
+    local counted = 0
+    for _, st in ipairs(stacks) do
+        if counted >= teamSize then break end
+        protected[st.id] = true
+        counted += st.amount
+    end
+
+    local best
+    for _, st in ipairs(stacks) do
+        if not protected[st.id] and st.amount >= free then
+            local okC, can = pcall(DL.CanEnroll, st.item)
+            if okC and can and (not best or st.amount > best.amount or (st.amount == best.amount and st.power < best.power)) then best = st end
+        end
+    end
+    if not best then
+        return setStatus("daycareenroll", ("Waiting for a spare stack of %d+ (best pets are never used)"):format(free))
+    end
+    local ok, a, b = pcall(G.DaycareCmds.Enroll, { [best.uid] = free })
+    if ok and a then
+        UI.toast("DAYCARE", ("Enrolled %d x %s"):format(free, best.id), THEME.good)
+        setStatus("daycareenroll", ("Enrolled %d x %s (stack of %s)"):format(free, best.id, commas(best.amount)))
+    else
+        setStatus("daycareenroll", "Enroll refused: " .. tostring(b or a))
+    end
+end)
+-- TYCOON HOT COCOA -----------------------------------------------------------
+-- Keeps the three cocoa boosts (coins, damage, island luck) topped up. They
+-- cost Patch Coins per minute and the stand only sells to you in person.
+loop("cocoa", 20, function()
+    local plot, _, m = Tycoon.plot()
+    if not plot then return setStatus("cocoa", "Only works inside the Pumpkin Tycoon") end
+    local okC, CocoaUtil = pcall(function() return require(RS.Library.Util.PumpkinTycoonCocoa) end)
+    local okK, Cocoa = pcall(function() return require(RS.Library.Client.PumpkinTycoonCmds.Cocoa) end)
+    if not (okC and okK) then return end
+    local minutes = tonumber(Settings.values.cocoaMinutes) or 30
+    local need = {}
+    for _, offer in pairs(CocoaUtil.OFFERS) do
+        local okR, left = pcall(Cocoa.Remaining, offer.Id)
+        if okR and (tonumber(left) or 0) < 120 then need[#need + 1] = offer end
+    end
+    if #need == 0 then return setStatus("cocoa", "All three cocoa boosts are running") end
+    local stand
+    -- your own island only: other players' islands have a stand too
+    pcall(function()
+        local decor = m.Island.Decor(plot)
+        stand = decor and decor:FindFirstChild("PumpkinTycoonCocoaStand_Look", true)
+    end)
+    if not stand then return setStatus("cocoa", "Build the Hot Cocoa Stand first") end
+    local spot = stand:GetPivot().Position
+    local bought, reason = {}, nil
+    withTeleport(function(root)
+        root.CFrame = CFrame.new(spot + Vector3.new(0, 4, 8), spot)
+        task.wait(0.8)
+        for _, offer in ipairs(need) do
+            -- the stand has a short cooldown between sales: space them out, retry once
+            for _ = 1, 2 do
+                local ok, a, b = pcall(function() return plot:Invoke(CocoaUtil.VERB_BUY, offer.Id, minutes) end)
+                if ok and a == true then bought[#bought + 1] = offer.Axis break end
+                reason = b or a
+                task.wait(1.2)
+            end
+            task.wait(1.2)
+        end
+    end)
+    if #bought > 0 then
+        setStatus("cocoa", ("Bought %d min of %s cocoa"):format(minutes, table.concat(bought, ", ")))
+    else
+        setStatus("cocoa", "Cocoa refused: " .. tostring(reason))
+    end
+end)
+-- PANIC ------------------------------------------------------------------
+function F.stopAll()
+    local n = 0
+    for _, h in ipairs(UI.allToggles) do
+        if h.get() and h.key ~= "antiafk" and h.key ~= "hatchalerts" then h.set(false, true) n += 1 end
+    end
+    UI.toast("EVERYTHING STOPPED", ("%d feature%s switched off"):format(n, n == 1 and "" or "s"), THEME.bad)
+end
 -- MISC: walkspeed ---------------------------------------------------
 local walkSpeed = 0
 RunService.Heartbeat:Connect(function()
@@ -2360,6 +2990,8 @@ end)
 -- BUILD THE PAGES
 ----------------------------------------------------------------------
 do
+    local pinnedTab = UI.tab("Pinned", 0)
+    UI.pinnedTab = pinnedTab
     local farm = UI.tab("Farm", 1)
     local s = UI.section(farm, "Hatching", THEME.gold)
     UI.toggle(s, "hatch", "Auto Hatch", "Hatches the nearest egg at max amount, no animation", false, function(on) if on then F.startHatch() end end)
@@ -2382,8 +3014,273 @@ do
     UI.status(s, "tycoonfarm", "Off")
     UI.toggle(s, "tycoonupgrades", "Auto Token Upgrades", "Spends Pumpkin Tokens, coin and damage upgrades first", false)
     UI.status(s, "tycoonupgrades", "Off")
+    UI.toggle(s, "cocoa", "Auto Hot Cocoa", "Keeps the coins, damage and luck cocoa boosts topped up", false)
+    UI.status(s, "cocoa", "Off")
+    UI.slider(s, "cocoaMinutes", "Cocoa minutes per top-up", 10, 120, 30, 10)
+    s = UI.section(farm, "Tycoon wild pets", Color3.fromRGB(255, 170, 90))
+    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Hops to the best wild pet and throws a net, huges first", false)
+    UI.status(s, "wildcatch", "Off")
+    UI.slider(s, "wildMin", "Only throw at catch chance % or higher", 5, 100, 50, 5)
+    UI.toggle(s, "wildultra", "Use Ultra Nets", "5x catch chance; spent on huges and low-chance pets only", false)
+    UI.toggle(s, "tycoonautonets", "Auto Buy Nets", "Turns on the tycoon's own net restock (uses Patch Coins)", false, function(on)
+        local plot, _, m = Tycoon.plot()
+        if plot then
+            local ok, a, b = pcall(function() return plot:Invoke(m.Types.NET.SetAutoNets, on) end)
+            setStatus("tycoonautonets", (ok and a) and (on and "Tycoon is restocking nets for you" or "Net restock off") or ("Refused: " .. tostring(b or a)))
+        else
+            setStatus("tycoonautonets", "Join the tycoon to switch this")
+        end
+    end)
+    UI.status(s, "tycoonautonets", "Off")
 
-    local rewards = UI.tab("Rewards", 2)
+    -- EGGS: live chances + rare hatch log ---------------------------------
+    local eggsTab = UI.tab("Eggs", 2)
+    s = UI.section(eggsTab, "Egg chances", THEME.gold)
+    do
+        local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
+        local TIERS = {
+            { name = "TITANIC", colour = Color3.fromRGB(255, 120, 230) },
+            { name = "HUGE", colour = Color3.fromRGB(255, 211, 61) },
+            { name = "LEGENDARY", colour = Color3.fromRGB(255, 110, 110) },
+            { name = "EPIC", colour = Color3.fromRGB(190, 130, 255) },
+            { name = "RARE", colour = Color3.fromRGB(110, 180, 255) },
+            { name = "UNCOMMON", colour = Color3.fromRGB(120, 220, 170) },
+            { name = "COMMON", colour = Color3.fromRGB(200, 200, 210) },
+        }
+        local function tierOf(row)
+            if row.titanic then return TIERS[1] end
+            if row.huge then return TIERS[2] end
+            if row.p < 0.0001 then return TIERS[3] end
+            if row.p < 0.001 then return TIERS[4] end
+            if row.p < 0.01 then return TIERS[5] end
+            if row.p < 0.1 then return TIERS[6] end
+            return TIERS[7]
+        end
+        local function pctText(p)
+            local pc = p * 100
+            if pc >= 10 then return ("%.1f%%"):format(pc) end
+            if pc >= 1 then return ("%.2f%%"):format(pc) end
+            if pc >= 0.01 then return ("%.3f%%"):format(pc) end
+            local digits = math.clamp(math.ceil(-math.log10(pc)) + 2, 4, 12)
+            return (("%." .. digits .. "f"):format(pc)):gsub("0+$", "") .. "%"
+        end
+        local function oneIn(p)
+            local inv = 1 / math.max(p, 1e-12)
+            return inv < 10 and ("%.1f"):format(inv) or commas(inv)
+        end
+        local function duration(mins)
+            if mins < 1 then return ("%ds"):format(math.max(1, math.floor(mins * 60))) end
+            if mins < 60 then return ("%dm"):format(math.floor(mins)) end
+            if mins < 1440 then return ("%.1fh"):format(mins / 60) end
+            return ("%.1fd"):format(mins / 1440)
+        end
+
+        -- header: egg name + egg switcher
+        s.n += 1
+        local head = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, ZIndex = 4 }, s.frame)
+        local eggName = label(head, { text = "No egg nearby", font = Enum.Font.GothamBlack, size = 20, sz = UDim2.new(1, -240, 1, 0), pos = UDim2.fromOffset(4, 0), z = 5 })
+        local function pill(x, w, text)
+            local b = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, x, 0.5, 0), Size = UDim2.fromOffset(w, 28),
+                BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.25, Text = text, Font = Enum.Font.GothamBold, TextSize = 11,
+                TextColor3 = THEME.text, AutoButtonColor = false, ZIndex = 5 }, head)
+            corner(b, 14)
+            stroke(b, THEME.accent, 0.55)
+            return b
+        end
+        local nextBtn = pill(0, 44, ">")
+        local autoBtn = pill(-50, 64, "AUTO")
+        local prevBtn = pill(-120, 44, "<")
+        local function cycle(dir)
+            local list = Chances.eggsInRange()
+            if #list == 0 then return end
+            local cur = table.find(list, Chances.currentEgg() or "") or 0
+            Chances.pinned = list[((cur - 1 + dir) % #list) + 1]
+        end
+        nextBtn.MouseButton1Click:Connect(function() cycle(1) end)
+        prevBtn.MouseButton1Click:Connect(function() cycle(-1) end)
+        autoBtn.MouseButton1Click:Connect(function() Chances.pinned = nil end)
+
+        -- stat tiles
+        s.n += 1
+        local tiles = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 52), BackgroundTransparency = 1, ZIndex = 4 }, s.frame)
+        new("UIGridLayout", { CellSize = UDim2.new(0.25, -6, 1, 0), CellPadding = UDim2.fromOffset(8, 0), SortOrder = Enum.SortOrder.LayoutOrder }, tiles)
+        local tileValue = {}
+        for i, name in ipairs({ "LUCK", "PER HATCH", "EGGS / MIN", "RAREST" }) do
+            local tile = new("Frame", { LayoutOrder = i, BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.45, ZIndex = 5 }, tiles)
+            corner(tile, 10)
+            UI.glassAdd(tile)
+            label(tile, { text = name, font = Enum.Font.GothamBold, size = 9, colour = THEME.muted, sz = UDim2.new(1, -16, 0, 14), pos = UDim2.fromOffset(10, 7), z = 6 })
+            tileValue[name] = label(tile, { text = "-", font = Enum.Font.GothamBlack, size = 16, sz = UDim2.new(1, -16, 0, 20), pos = UDim2.fromOffset(10, 23), z = 6 })
+        end
+
+        -- view filters
+        s.n += 1
+        local filters = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, ZIndex = 4 }, s.frame)
+        new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, filters)
+        local view = { rareFirst = Settings.values.eggRareFirst == true, rareOnly = Settings.values.eggRareOnly == true }
+        local function chip(order, text, key)
+            local b = new("TextButton", { LayoutOrder = order, AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 26), Text = text,
+                Font = Enum.Font.GothamBold, TextSize = 10, AutoButtonColor = false, ZIndex = 5 }, filters)
+            corner(b, 13)
+            UI.pad(b, 12, 12)
+            local function paint()
+                b.BackgroundColor3 = view[key] and THEME.accent or THEME.surface
+                b.BackgroundTransparency = view[key] and 0.05 or 0.35
+                b.TextColor3 = view[key] and Color3.fromRGB(40, 14, 30) or THEME.text
+            end
+            b.MouseButton1Click:Connect(function()
+                view[key] = not view[key]
+                Settings.values[key == "rareFirst" and "eggRareFirst" or "eggRareOnly"] = view[key]
+                persist()
+                paint()
+                Chances.redraw = true
+            end)
+            paint()
+        end
+        chip(1, "RAREST FIRST", "rareFirst")
+        chip(2, "HIDE COMMONS", "rareOnly")
+        local note = label(filters, { text = "", size = 10, colour = THEME.muted, sz = UDim2.fromOffset(260, 26), z = 5 })
+        note.LayoutOrder = 3
+        UI.pad(note, 8)
+
+        s.n += 1
+        local list = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, ZIndex = 4 }, s.frame)
+        new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+        local empty = label(list, { text = "Stand next to an egg (or turn on Auto Hatch) to see its odds.", size = 12, colour = THEME.muted, sz = UDim2.new(1, 0, 0, 40), z = 5, align = Enum.TextXAlignment.Center })
+        local rows = {}
+        local function rowFor(i)
+            if rows[i] then return rows[i] end
+            local r = new("Frame", { LayoutOrder = i, Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.5, ZIndex = 4 }, list)
+            corner(r, 12)
+            UI.glassAdd(r)
+            local rs = stroke(r, THEME.stroke, 0.7)
+            local tile = new("Frame", { Position = UDim2.fromOffset(8, 8), Size = UDim2.fromOffset(42, 42), BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.3, ZIndex = 5 }, r)
+            corner(tile, 10)
+            local tileStroke = stroke(tile, THEME.stroke, 0.3, 1.5)
+            local thumb = new("ImageLabel", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(36, 36),
+                BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit, ZIndex = 6 }, tile)
+            local name = label(r, { text = "", font = Enum.Font.GothamBold, size = 14, sz = UDim2.new(1, -260, 0, 18), pos = UDim2.fromOffset(60, 9), z = 5 })
+            local tier = new("TextLabel", { Position = UDim2.fromOffset(60, 31), Size = UDim2.fromOffset(0, 16), AutomaticSize = Enum.AutomaticSize.X,
+                BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.2, Font = Enum.Font.GothamBlack, TextSize = 9, Text = "", ZIndex = 5 }, r)
+            corner(tier, 8)
+            UI.pad(tier, 7, 7)
+            local odds = label(r, { text = "", size = 11, colour = THEME.muted, sz = UDim2.new(1, -330, 0, 16), pos = UDim2.fromOffset(150, 31), z = 5 })
+            local pct = label(r, { text = "", font = Enum.Font.GothamBlack, size = 20, align = Enum.TextXAlignment.Right,
+                anchor = Vector2.new(1, 0), sz = UDim2.fromOffset(160, 24), pos = UDim2.new(1, -14, 0, 7), z = 5 })
+            local eta = label(r, { text = "", size = 11, colour = THEME.muted, align = Enum.TextXAlignment.Right,
+                anchor = Vector2.new(1, 0), sz = UDim2.fromOffset(190, 16), pos = UDim2.new(1, -14, 0, 32), z = 5 })
+            local track = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 60, 1, -4), Size = UDim2.new(1, -74, 0, 3),
+                BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.4, ZIndex = 5 }, r)
+            corner(track, 2)
+            local fill = new("Frame", { Size = UDim2.fromScale(0, 1), ZIndex = 6 }, track)
+            corner(fill, 2)
+            rows[i] = { frame = r, stroke = rs, tile = tile, tileStroke = tileStroke, thumb = thumb, name = name, tier = tier, odds = odds, pct = pct, eta = eta, fill = fill }
+            return rows[i]
+        end
+        local function render()
+            Chances.refresh()
+            local id = Chances.eggId
+            if not id or #Chances.rows == 0 then
+                eggName.Text = "No egg nearby"
+                for _, v in pairs(tileValue) do v.Text = "-" end
+                empty.Visible = true
+                for _, r in pairs(rows) do r.frame.Visible = false end
+                return
+            end
+            empty.Visible = false
+            local per = Chances.perHatch()
+            local rate = 0
+            local el = os.clock() - S.hatchT0
+            if S.on.hatch and el > 5 then rate = (S.eggs - S.eggsAtStart) / el * 60 end
+            eggName.Text = id .. (Chances.pinned and "  (pinned)" or "")
+            tileValue["LUCK"].Text = "+" .. commas(Chances.luck) .. "%"
+            tileValue["LUCK"].TextColor3 = THEME.good
+            tileValue["PER HATCH"].Text = commas(per)
+            tileValue["EGGS / MIN"].Text = rate > 0 and commas(rate) or "idle"
+            local rarest = Chances.rows[#Chances.rows]
+            tileValue["RAREST"].Text = rarest and ("1 in " .. oneIn(rarest.p)) or "-"
+            tileValue["RAREST"].TextColor3 = rarest and tierOf(rarest).colour or THEME.text
+            note.Text = "Odds already include your luck"
+
+            local shown = {}
+            for _, row in ipairs(Chances.rows) do
+                if not view.rareOnly or row.p < 0.01 or row.huge or row.titanic then shown[#shown + 1] = row end
+            end
+            if view.rareFirst then table.sort(shown, function(a, b) return a.p < b.p end) end
+            for i, row in ipairs(shown) do
+                local r = rowFor(i)
+                local tierInfo = tierOf(row)
+                r.frame.Visible = true
+                r.thumb.Image = row.thumb or ""
+                r.name.Text = row.id
+                r.tier.Text = tierInfo.name
+                r.tier.TextColor3 = tierInfo.colour
+                r.tileStroke.Color = tierInfo.colour
+                r.pct.Text = pctText(row.p)
+                r.pct.TextColor3 = tierInfo.colour
+                r.fill.BackgroundColor3 = tierInfo.colour
+                r.fill.Size = UDim2.fromScale(math.clamp((math.log10(math.max(row.p, 1e-9)) + 7) / 7, 0.02, 1), 1)
+                r.odds.Text = ("1 in %s  ·  hatched %s"):format(oneIn(row.p), commas(Tracker.hatched[row.id] or 0))
+                local batch = 1 - (1 - row.p) ^ per
+                local etaText = batch >= 0.995 and "every hatch" or (batch >= 0.0001 and ("%s per hatch"):format(pctText(batch)) or ("1 in %s per hatch"):format(oneIn(batch)))
+                if rate > 0 and row.p < 0.5 then etaText = etaText .. "  ·  ~" .. duration((1 / row.p) / rate) end
+                r.eta.Text = etaText
+                local special = row.huge or row.titanic
+                r.stroke.Color = special and tierInfo.colour or THEME.stroke
+                r.stroke.Transparency = special and 0.2 or 0.7
+            end
+            for i = #shown + 1, #rows do rows[i].frame.Visible = false end
+        end
+        task.spawn(function()
+            while alive() do
+                if eggsTab.page.Visible and UI.win.Visible then pcall(render) end
+                for _ = 1, 15 do
+                    if Chances.redraw then break end
+                    task.wait(0.1)
+                end
+                Chances.redraw = false
+            end
+        end)
+        Chances.pinnedChanged = function() Chances.redraw = true end
+        for _, b in ipairs({ nextBtn, prevBtn, autoBtn }) do b.MouseButton1Click:Connect(function() Chances.redraw = true end) end
+    end    s = UI.section(eggsTab, "Huge alerts", THEME.gold)
+    UI.toggle(s, "hatchalerts", "Huge Alerts", "Toast + log for huges, titanics and gargantuans only", true)
+    UI.status(s, "hatchalerts", "")
+    UI.toggle(s, "webhook", "Discord Webhook", "Posts every huge, titanic and gargantuan to your Discord channel", false)
+    UI.status(s, "webhook", "Off")
+    UI.textbox(s, "webhookUrl", "Webhook URL", "https://discord.com/api/webhooks/...", true)
+    UI.toggle(s, "webhookping", "Ping @everyone", nil, false)
+    UI.button(s, "Send test message", function()
+        if not Webhook.url() then
+            UI.toast("WEBHOOK", "Paste a Discord webhook URL first", THEME.bad)
+            return
+        end
+        local ok, err = Webhook.send({ tag = "HUGE", name = "Test message (not a real hatch)", amount = 1, egg = Chances.eggId })
+        UI.toast("WEBHOOK", ok and "Test sent - check your channel" or ("Failed: " .. tostring(err)), ok and THEME.good or THEME.bad)
+        setStatus("webhook", ok and "Test message sent" or ("Webhook failed: " .. tostring(err)))
+    end)
+    do
+        local logLines = {}
+        for i = 1, 8 do
+            s.n += 1
+            local l = UI.label(s.frame, { text = "", size = 11, colour = THEME.muted, sz = UDim2.new(1, 0, 0, 15), z = 4 })
+            l.LayoutOrder = s.n
+            UI.pad(l, 16)
+            logLines[i] = l
+        end
+        task.spawn(function()
+            while alive() do
+                for i, l in ipairs(logLines) do
+                    local e = Tracker.log[i]
+                    l.Text = e and (e.at .. "   " .. e.text) or (i == 1 and "Nothing rare yet this session" or "")
+                    l.TextColor3 = e and e.colour or THEME.muted
+                end
+                task.wait(1)
+            end
+        end)
+    end
+
+    local rewards = UI.tab("Rewards", 3)
     s = UI.section(rewards, "Daily claims", THEME.gold)
     UI.toggle(s, "freegifts", "Auto Free Gifts", "Claims each play-time gift the moment it unlocks", true)
     UI.status(s, "freegifts", "")
@@ -2397,6 +3294,12 @@ do
     UI.status(s, "foreverpack", "")
     UI.toggle(s, "daycare", "Auto Collect Daycare", nil, true)
     UI.status(s, "daycare", "")
+    UI.toggle(s, "daycareenroll", "Auto Enroll Daycare", "Fills all free slots from one big spare stack, never your best pets", false)
+    UI.status(s, "daycareenroll", "")
+    UI.toggle(s, "extraclaims", "Auto Extra Claims", "Welcome-back gift, exclusive daycare, transfers, diamond party", true)
+    UI.status(s, "extraclaims", "")
+    UI.toggle(s, "spinwheel", "Auto Spinny Wheel", "Spends Spinny Wheel Tickets on the spawn wheel (main world)", false)
+    UI.status(s, "spinwheel", "")
     s = UI.section(rewards, "Collectibles", THEME.accent)
     UI.toggle(s, "relics", "Auto Shiny Relics", "Finds every shiny relic, no walking needed", true)
     UI.status(s, "relics", "")
@@ -2409,8 +3312,11 @@ do
     UI.status(s, "machines", "")
     UI.toggle(s, "balloons", "Auto Balloon Gifts", "Slingshots floating balloons and grabs the gift", false)
     UI.status(s, "balloons", "")
+    UI.toggle(s, "vending", "Auto Vending Machines", "Buys out coin vending machines in this world as they restock", false)
+    UI.status(s, "vending", "")
+    UI.toggle(s, "vendingdiamonds", "Include Diamond Machines", "Rare potion / enchant machines that cost diamonds", false)
 
-    local items = UI.tab("Items", 3)
+    local items = UI.tab("Items", 4)
     s = UI.section(items, "Boosts", THEME.good)
     UI.toggle(s, "potions", "Auto Potions", "Keeps one of every potion type running, best tier first", false)
     UI.status(s, "potions", "")
@@ -2435,25 +3341,40 @@ do
     UI.toggle(s, "tnt", "Auto TNT", nil, false)
     UI.status(s, "tnt", "")
 
-    local pets = UI.tab("Pets", 4)
+    local pets = UI.tab("Pets", 5)
     s = UI.section(pets, "Machines", THEME.gold)
     UI.toggle(s, "golden", "Auto Golden", "Turns every 10 of a normal pet into a golden one (skips huges)", false)
     UI.status(s, "golden", "")
     UI.toggle(s, "rainbow", "Auto Rainbow", "Turns every 10 goldens into a rainbow (skips huges)", false)
     UI.status(s, "rainbow", "")
 
-    local progress = UI.tab("Progress", 5)
+    local progress = UI.tab("Progress", 6)
     s = UI.section(progress, "Unlocks", THEME.good)
     UI.toggle(s, "zones", "Auto Buy Next Zone", "Buys the next zone in this world as soon as you can afford it", false)
     UI.status(s, "zones", "")
     UI.toggle(s, "rebirth", "Auto Rebirth", "Rebirths when the next one is available", false)
     UI.status(s, "rebirth", "")
+    s = UI.section(progress, "Slots", THEME.gold)
+    UI.toggle(s, "equipslots", "Auto Equip Slots", "Buys the next pet equip slot your rank allows", false)
+    UI.status(s, "equipslots", "")
+    UI.toggle(s, "eggslots", "Auto Egg Slots", "Buys the next egg-hatch slot bundle", false)
+    UI.status(s, "eggslots", "")
+    UI.slider(s, "slotReserve", "Keep at least (million diamonds)", 0, 50, 2, 1)
 
-    local misc = UI.tab("Misc", 6)
+    local misc = UI.tab("Misc", 7)
     s = UI.section(misc, "Player", Color3.fromRGB(140, 210, 255))
     UI.toggle(s, "antiafk", "Anti AFK", "Stops Roblox kicking you for idling", true)
     UI.toggle(s, "walkspeed", "Custom Walk Speed", nil, false)
     UI.slider(s, "walkspeedValue", "Walk speed", 16, 120, 40, 1, function(v) walkSpeed = v end)
+    s = UI.section(misc, "Interface", THEME.accent)
+    UI.slider(s, "glass", "Glass opacity %", 10, 200, 100, 5, function(v) UI.setGlass(v) end)
+    UI.keybind(s, "hide", "Show / hide hub", "LeftControl")
+    UI.keybind(s, "panic", "Stop everything", "End")
+    UI.keybind(s, "palette", "Search palette", "Backquote")
+    UI.button(s, "Stop everything now", function() F.stopAll() end)
+    UI.toggle(s, "minihud", "Mini HUD while hidden", "A small status pill at the top of the screen when the hub is closed", true)
+    s = UI.section(misc, "Session", Color3.fromRGB(140, 210, 255))
+    UI.status(s, "session", "")
     s = UI.section(misc, "Hub", THEME.accent)
     UI.button(s, "Claim everything now", function()
         for _, l in ipairs(loops) do
@@ -2464,6 +3385,165 @@ do
         UI.toast("CLAIMING", "Every daily reward", THEME.gold)
     end)
     UI.button(s, "Unload hub", function() env.__PS99HUB_CLEANUP() end)
+
+    -- PINNED: mirrors of any switch you pinned with its little diamond
+    do
+        local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
+        local holder, mirrors = nil, {}
+        function UI.refreshPins()
+            if holder then holder:Destroy() end
+            mirrors = {}
+            local sec = UI.section(pinnedTab, "Pinned switches", THEME.gold)
+            holder = sec.frame
+            local any = false
+            for _, h in ipairs(UI.allToggles) do
+                if Settings.values["pin_" .. h.key] == true then
+                    any = true
+                    sec.n += 1
+                    local row = new("TextButton", { LayoutOrder = sec.n, Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = THEME.panel,
+                        BackgroundTransparency = 0.62, Text = "", AutoButtonColor = false, ZIndex = 4 }, holder)
+                    corner(row, 10)
+                    UI.glassAdd(row)
+                    local bar = new("Frame", { Position = UDim2.new(0, 6, 0, 8), Size = UDim2.new(0, 3, 1, -16), BackgroundColor3 = THEME.on, ZIndex = 5 }, row)
+                    corner(bar, 2)
+                    local nm = label(row, { text = h.title, font = Enum.Font.GothamBold, size = 13, sz = UDim2.new(1, -100, 0, 18), pos = UDim2.fromOffset(16, 6), z = 5 })
+                    label(row, { text = h.tab.title .. (h.desc and ("  ·  " .. h.desc) or ""), size = 11, colour = THEME.muted, sz = UDim2.new(1, -100, 0, 14), pos = UDim2.fromOffset(16, 25), z = 5 })
+                    local track = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(42, 22), ZIndex = 5 }, row)
+                    corner(track, 11)
+                    local knob = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(16, 16), BackgroundColor3 = Color3.new(1, 1, 1), ZIndex = 6 }, track)
+                    corner(knob, 8)
+                    local unpin = new("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -62, 0.5, 0), Size = UDim2.fromOffset(22, 22),
+                        BackgroundTransparency = 1, Text = "x", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.muted, ZIndex = 6 }, row)
+                    unpin.MouseButton1Click:Connect(function()
+                        Settings.values["pin_" .. h.key] = nil
+                        persist()
+                        if h.paintPin then h.paintPin() end
+                        task.defer(UI.refreshPins)
+                    end)
+                    row.MouseButton1Click:Connect(function() h.flip() end)
+                    mirrors[#mirrors + 1] = { h = h, track = track, knob = knob, bar = bar, name = nm }
+                end
+            end
+            if not any then
+                sec.n += 1
+                local l = label(holder, { text = "Click the little diamond next to any switch to pin it here.", size = 12, colour = THEME.muted, sz = UDim2.new(1, 0, 0, 30), z = 4 })
+                l.LayoutOrder = sec.n
+                UI.pad(l, 16)
+            end
+        end
+        UI.refreshPins()
+        task.spawn(function()
+            while alive() do
+                if pinnedTab.page.Visible then
+                    for _, m in ipairs(mirrors) do
+                        local on = m.h.get()
+                        m.track.BackgroundColor3 = on and THEME.on or THEME.surface
+                        m.knob.Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+                        m.bar.BackgroundTransparency = on and 0 or 1
+                        m.name.TextColor3 = on and THEME.text or THEME.muted
+                    end
+                end
+                task.wait(0.3)
+            end
+        end)
+    end
+
+    -- ALERTS: a header chip with a count, opening the last 30 notifications
+    do
+        local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
+        local chip = new("TextButton", { LayoutOrder = 0, AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 26),
+            BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.45, Text = "ALERTS", Font = Enum.Font.GothamBold, TextSize = 11,
+            TextColor3 = THEME.text, AutoButtonColor = false, ZIndex = 3 }, UI.searchChip.Parent)
+        corner(chip, 13)
+        stroke(chip, THEME.accent, 0.5)
+        UI.pad(chip, 12, 12)
+        local panel = new("Frame", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -18, 0, 132), Size = UDim2.fromOffset(340, 360),
+            BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.06, Visible = false, ZIndex = 150 }, UI.win)
+        corner(panel, 14)
+        stroke(panel, THEME.accent, 0.4, 1.4)
+        label(panel, { text = "NOTIFICATIONS", font = Enum.Font.GothamBlack, size = 13, colour = THEME.accent, sz = UDim2.new(1, -100, 0, 20), pos = UDim2.fromOffset(16, 12), z = 151 })
+        local clear = new("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10), Size = UDim2.fromOffset(60, 24),
+            BackgroundColor3 = THEME.surface, Text = "CLEAR", Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = THEME.muted, ZIndex = 151 }, panel)
+        corner(clear, 12)
+        local list = new("ScrollingFrame", { Position = UDim2.fromOffset(8, 42), Size = UDim2.new(1, -16, 1, -50), BackgroundTransparency = 1, BorderSizePixel = 0,
+            ScrollBarThickness = 3, ScrollBarImageColor3 = THEME.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ZIndex = 151 }, panel)
+        new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+        local function paintChip()
+            local n = UI.unread or 0
+            chip.Text = n > 0 and ("ALERTS  " .. n) or "ALERTS"
+            chip.BackgroundColor3 = n > 0 and THEME.accent or THEME.surface
+            chip.TextColor3 = n > 0 and Color3.fromRGB(40, 14, 30) or THEME.text
+        end
+        local function fill()
+            for _, c in ipairs(list:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+            if #UI.history == 0 then
+                label(list, { text = "Nothing yet.", size = 12, colour = THEME.muted, sz = UDim2.new(1, 0, 0, 30), z = 152, align = Enum.TextXAlignment.Center })
+            end
+            for i, h in ipairs(UI.history) do
+                local r = new("Frame", { LayoutOrder = i, Size = UDim2.new(1, -6, 0, 42), BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.3, ZIndex = 152 }, list)
+                corner(r, 8)
+                local strip = new("Frame", { Position = UDim2.fromOffset(6, 8), Size = UDim2.new(0, 3, 1, -16), BackgroundColor3 = h.colour, ZIndex = 153 }, r)
+                corner(strip, 2)
+                label(r, { text = h.title, font = Enum.Font.GothamBold, size = 12, colour = h.colour, sz = UDim2.new(1, -80, 0, 16), pos = UDim2.fromOffset(16, 5), z = 153 })
+                label(r, { text = h.at, size = 10, colour = THEME.muted, align = Enum.TextXAlignment.Right, anchor = Vector2.new(1, 0), sz = UDim2.fromOffset(60, 16), pos = UDim2.new(1, -8, 0, 5), z = 153 })
+                label(r, { text = h.body, size = 11, sz = UDim2.new(1, -24, 0, 16), pos = UDim2.fromOffset(16, 22), z = 153 })
+            end
+        end
+        chip.MouseButton1Click:Connect(function()
+            panel.Visible = not panel.Visible
+            if panel.Visible then UI.unread = 0 fill() end
+            paintChip()
+        end)
+        clear.MouseButton1Click:Connect(function() table.clear(UI.history) UI.unread = 0 fill() paintChip() end)
+        UI.onToast = function()
+            if panel.Visible then UI.unread = 0 fill() end
+            paintChip()
+        end
+        paintChip()
+    end
+
+    -- MINI HUD: a small pill when the hub is hidden
+    do
+        local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
+        local pill = new("TextButton", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 8), Size = UDim2.fromOffset(0, 30),
+            AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.2, Text = "", AutoButtonColor = false,
+            Visible = false, ZIndex = 40 }, UI.gui)
+        corner(pill, 15)
+        stroke(pill, THEME.accent, 0.45, 1.3)
+        UI.pad(pill, 14, 14)
+        new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center,
+            Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, pill)
+        local dot = new("Frame", { LayoutOrder = 1, Size = UDim2.fromOffset(8, 8), BackgroundColor3 = THEME.on, ZIndex = 41 }, pill)
+        corner(dot, 4)
+        local txt = new("TextLabel", { LayoutOrder = 2, AutomaticSize = Enum.AutomaticSize.X, Size = UDim2.fromOffset(0, 30), BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = THEME.text, RichText = true, Text = "", ZIndex = 41 }, pill)
+        pill.MouseButton1Click:Connect(function() UI.setVisible(true) end)
+        task.spawn(function()
+            local beat = 0
+            while alive() do
+                local show = not UI.win.Visible and S.on.minihud ~= false
+                pill.Visible = show
+                if show then
+                    beat += 1
+                    local running = 0
+                    for _, h in ipairs(UI.allToggles) do if h.get() and h.key ~= "minihud" and h.key ~= "antiafk" and h.key ~= "hatchalerts" then running += 1 end end
+                    local parts = { ('<font color="#ff96be">PS99</font>  %d running'):format(running) }
+                    local okH, lifetime = pcall(function() return save().EggsHatched end)
+                    if okH and tonumber(lifetime) then
+                        parts[#parts + 1] = ("%s hatched%s"):format(commas(lifetime), S.eggs > 0 and ((" (+%s)"):format(commas(S.eggs))) or "")
+                    end
+                    local el = os.clock() - S.hatchT0
+                    if S.on.hatch and el > 5 then parts[#parts + 1] = commas((S.eggs - S.eggsAtStart) / el * 60) .. " eggs/min" end
+                    if S.on.tycoon and S.status.tycoon then parts[#parts + 1] = S.status.tycoon:gsub("%s+coins$", "") end
+                    if Tracker.huges > 0 then parts[#parts + 1] = ('<font color="#ffd33d">%d huge%s</font>'):format(Tracker.huges, Tracker.huges == 1 and "" or "s") end
+                    txt.Text = table.concat(parts, "   ·   ")
+                    dot.BackgroundTransparency = (running > 0 and beat % 2 == 0) and 0.6 or 0
+                    dot.BackgroundColor3 = running > 0 and THEME.on or THEME.muted
+                end
+                task.wait(1)
+            end
+        end)
+    end
 
     UI.select(farm, true)
 end
@@ -2477,7 +3557,18 @@ task.spawn(function()
         for _, line in ipairs(UI.statusLines) do
             local text = S.status[line.key]
             if not S.on[line.key] then text = "Off" end
-            if text and line.label.Text ~= text then line.label.Text = text end
+            if text and line.label.Text ~= text then
+                line.label.Text = text
+                local low = text:lower()
+                local colour = THEME.muted
+                if low:find("refused") or low:find("error") or low:find("can't") or low:find("out of") or low:find("missed") then
+                    colour = Color3.fromRGB(255, 140, 150)
+                elseif low:find("^caught") or low:find("^bought") or low:find("^claimed") or low:find("^hatching") or low:find("^farming")
+                    or low:find("^upgraded") or low:find("^enrolled") or low:find("^spun") or low:find("^used") or low:find("^opened") then
+                    colour = Color3.fromRGB(150, 230, 170)
+                end
+                line.label.TextColor3 = colour
+            end
         end
         local running = 0
         for _, t in ipairs(UI.tabs) do
@@ -2514,8 +3605,36 @@ end)
 ----------------------------------------------------------------------
 -- HOTKEY / CLEANUP
 ----------------------------------------------------------------------
-UIS.InputBegan:Connect(function(input, processed)
-    if input.KeyCode == Enum.KeyCode.LeftControl and not UIS:GetFocusedTextBox() then UI.setVisible(not UI.win.Visible) end
+UIS.InputBegan:Connect(function(input)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard or UIS:GetFocusedTextBox() then return end
+    for _, b in pairs(UI.binds) do if b.busy() then return end end
+    local hide, panic = UI.binds.hide.get(), UI.binds.panic.get()
+    if hide and input.KeyCode == hide then UI.setVisible(not UI.win.Visible) end
+    if panic and input.KeyCode == panic then F.stopAll() end
+end)
+
+-- session numbers for the Misc tab
+task.spawn(function()
+    local gems0, coins0 = nil, nil
+    local t0 = os.clock()
+    while alive() do
+        local gems = diamonds()
+        gems0 = gems0 or gems
+        local coinsNow
+        local plot, _, m = Tycoon.plot()
+        if plot then coinsNow = Tycoon.coins(m) coins0 = coins0 or coinsNow end
+        local dg = gems - gems0
+        local parts = {
+            ("Diamonds %s%s"):format(dg >= 0 and "+" or "-", short(math.abs(dg))),
+            ("Eggs %s"):format(commas(S.eggs)),
+            ("Huges %d"):format(Tracker.huges),
+        }
+        if coinsNow then parts[#parts + 1] = ("Tycoon coins %s"):format(short(coinsNow)) end
+        parts[#parts + 1] = ("Up %dm"):format(math.floor((os.clock() - t0) / 60))
+        S.status.session = table.concat(parts, "  ·  ")
+        S.on.session = true
+        task.wait(2)
+    end
 end)
 
 env.__PS99HUB_CLEANUP = function()
