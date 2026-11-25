@@ -576,10 +576,17 @@ local function pdBuildScene(parent, opts)
     end
 
     local clock, wind = 0, 1
+    local frameAcc = 0
     local conn
     conn = RunService.RenderStepped:Connect(function(dt)
         if not scene.Parent then conn:Disconnect() return end
         if opts.active and not opts.active() then return end
+        -- frame cap: the scene sits in a CanvasGroup, so every update re-renders it
+        local fps = opts.fps and opts.fps() or 60
+        frameAcc = frameAcc + dt
+        if fps <= 0 then if clock > 0 then return end elseif frameAcc < 1 / fps then return end
+        dt = math.min(frameAcc, 0.25)
+        frameAcc = 0
         clock = clock + dt
         for _, s in ipairs(stars) do
             s.frame.BackgroundTransparency = 0.35 + 0.55 * (0.5 + 0.5 * math.sin(clock * s.speed + s.phase))
@@ -688,6 +695,11 @@ do
 end
 
 local function save() return G.Save.Get() end
+-- the game's Directory throws on unknown keys instead of returning nil
+local function dirGet(category, key)
+    local ok, v = pcall(function() return G.Directory[category][key] end)
+    return ok and v or nil
+end
 local function hrp()
     local c = LocalPlayer.Character
     return c and c:FindFirstChild("HumanoidRootPart")
@@ -885,7 +897,8 @@ do
     local function shown()
         return win.Visible and gui.Enabled
     end
-    local sceneHandle = pdBuildScene(sceneHost, { active = shown })
+    UI.sceneFps = tonumber(Settings.values.sceneFps) or 24
+    local sceneHandle = pdBuildScene(sceneHost, { active = shown, fps = function() return UI.sceneFps end })
     -- a light dusk wash keeps text readable without hiding the scene
     local wash = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = THEME.bg, BackgroundTransparency = 0.82, ZIndex = 1 }, win)
     corner(wash, 22)
@@ -1679,6 +1692,91 @@ task.spawn(function()
     end
 end)
 
+-- EGG FINDER ---------------------------------------------------------
+-- Worlds lay their eggs out differently: some name the model after the egg
+-- ("Spawn Egg"), newer ones nest numbered capsules ("252 - Egg Capsule")
+-- under a world model. Both resolve to the directory id here. Cached 3s.
+do
+    local byNumber, cache, cachedAt = nil, {}, 0
+    local function numberIndex()
+        if byNumber then return byNumber end
+        byNumber = {}
+        pcall(function()
+            for id, d in pairs(G.Directory.Eggs) do
+                if type(d) == "table" and d.eggNumber and not d.isCustomEgg then byNumber[d.eggNumber] = id end
+            end
+        end)
+        return byNumber
+    end
+    function F.eggModels()
+        if os.clock() - cachedAt < 3 then return cache end
+        cachedAt = os.clock()
+        local out, seen = {}, {}
+        -- ZoneEggs holds the real, placed eggs of the zones around you; the
+        -- plain Eggs folder can also hold placeholder capsules parked far away
+        for _, folderName in ipairs({ "ZoneEggs", "Eggs" }) do
+            local folder = G.THINGS:FindFirstChild(folderName)
+            for _, m in ipairs(folder and folder:GetDescendants() or {}) do
+                if m:IsA("Model") then
+                    local id = dirGet("Eggs", m.Name) and m.Name or nil
+                    if not id then
+                        local n = tonumber(m.Name:match("^(%d+)%s*%-"))
+                        id = n and numberIndex()[n] or nil
+                    end
+                    if id and not seen[id] then
+                        local okP, p = pcall(function() return m:GetPivot().Position end)
+                        if okP then
+                            seen[id] = true
+                            out[#out + 1] = { id = id, pos = p, model = m, dir = dirGet("Eggs", id) }
+                        end
+                    end
+                end
+            end
+        end
+        cache = out
+        return out
+    end
+    function F.eggPosition(id)
+        for _, e in ipairs(F.eggModels()) do if e.id == id then return e.pos end end
+        return nil
+    end
+    -- every area names the egg tied to it (zone.MaximumAvailableEgg)
+    function F.areaEgg(zone)
+        if type(zone) ~= "table" or not zone.MaximumAvailableEgg then return nil end
+        return numberIndex()[zone.MaximumAvailableEgg]
+    end
+    -- hatch an area's egg once if you never have; hops there and back
+    local hatchingArea = false
+    function F.hatchAreaEgg(zone, why)
+        local eggId = F.areaEgg(zone)
+        if not eggId or hatchingArea then return false, "no egg" end
+        local done = 0
+        pcall(function() done = (G.Save.Get().PurchasedEggs or {})[eggId] or 0 end)
+        if done > 0 then return true, "already hatched" end
+        cachedAt = 0
+        local pos = F.eggPosition(eggId)
+        if not pos then return false, eggId .. " isn't loaded nearby yet" end
+        hatchingArea = true
+        local ok, msg
+        withTeleport(function(root)
+            root.CFrame = CFrame.lookAt(pos + Vector3.new(0, 3, 8), pos)
+            task.wait(0.8)
+            local okL, locked = pcall(G.EggCmds.IsEggLocked, eggId)
+            if okL and locked then pcall(G.EggCmds.RequestUnlock, eggId) task.wait(0.5) end
+            ok, msg = invoke("Eggs_RequestPurchase", eggId, 1)
+            task.wait(0.6)
+        end)
+        hatchingArea = false
+        if ok then
+            UI.toast("AREA EGG", ("Hatched %s for %s"):format(eggId, tostring(zone.ZoneName or zone._id)), THEME.good)
+            setStatus("areaegg", ("Hatched %s (%s)"):format(eggId, why or "new area"))
+            return true
+        end
+        setStatus("areaegg", ("%s: %s"):format(eggId, tostring(msg)))
+        return false, msg
+    end
+end
+
 -- AUTO HATCH ---------------------------------------------------------
 do
     local REGULAR_RANGE = 30
@@ -1697,19 +1795,12 @@ do
                 if not bestD or d < bestD then bestD, best = d, { kind = "custom", id = e._id, key = e._uid, dir = e._dir, max = e._maxEggCount } end
             end
         end
-        local folder = G.THINGS:FindFirstChild("Eggs")
-        if folder then
-            for _, m in ipairs(folder:GetChildren()) do
-                local dir = m:IsA("Model") and eggDir(m.Name)
-                if dir then
-                    local okP, p = pcall(function() return m:GetPivot().Position end)
-                    if okP then
-                        local d = (p - pos).Magnitude
-                        local okL, locked = pcall(G.EggCmds.IsEggLocked, m.Name)
-                        if d <= REGULAR_RANGE and not (okL and locked) and (not bestD or d < bestD) then
-                            bestD, best = d, { kind = "regular", id = m.Name, key = m.Name, dir = dir }
-                        end
-                    end
+        for _, egg in ipairs(F.eggModels()) do
+            local d = (egg.pos - pos).Magnitude
+            if d <= REGULAR_RANGE and (not bestD or d < bestD) then
+                local okL, locked = pcall(G.EggCmds.IsEggLocked, egg.id)
+                if not (okL and locked) then
+                    bestD, best = d, { kind = "regular", id = egg.id, key = egg.id, dir = egg.dir }
                 end
             end
         end
@@ -1809,31 +1900,85 @@ do
             claim(orbFolder, "Orbs: Collect")
             env.__PS99HUB_FARM_ON = true
             local hits = 0
+            local assigned = {}
+            pcall(function() S.hasVip = require(RS.Library.Client.Gamepasses).Owns("VIP") == true end)
             while S.on.farm and alive() and breakFolder do
-                task.wait()
+                task.wait(0.08)
                 while S.on.tycoonfarm and S.on.farm and alive() and Tycoon.plot() do
                     setStatus("farm", "Paused - Tycoon Zone Farm is running")
                     task.wait(1)
                 end
                 local root = hrp()
-                local valid = {}
+                local valid, focus = {}, {}
+                -- S.farmZone: a quest wants one zone only (any distance);
+                -- S.farmFocus: breakable ids the quest cares about most
+                local zoneLock, focusWords = S.farmZone, S.farmFocus
                 if root then
                     for _, b in ipairs(breakFolder:GetChildren()) do
-                        if b:IsA("Model") and b.PrimaryPart and (root.Position - b.PrimaryPart.Position).Magnitude <= BREAK_RANGE then
-                            valid[#valid + 1] = b.Name
+                        -- VIP-only piles can't be damaged without the VIP pass
+                        if b:IsA("Model") and (S.hasVip or not tostring(b:GetAttribute("BreakableID") or ""):find("VIP", 1, true)) then
+                            local ok = false
+                            if zoneLock then
+                                ok = b:GetAttribute("ParentID") == zoneLock
+                            elseif b.PrimaryPart then
+                                ok = (root.Position - b.PrimaryPart.Position).Magnitude <= BREAK_RANGE
+                            end
+                            if ok then
+                                valid[#valid + 1] = b.Name
+                                if focusWords then
+                                    local bid = tostring(b:GetAttribute("BreakableID") or "")
+                                    for _, w in ipairs(focusWords) do
+                                        if bid:find(w, 1, true) then focus[#focus + 1] = b.Name break end
+                                    end
+                                end
+                            end
                         end
                     end
                 end
                 local pets = {}
                 for id in pairs(G.PlayerPet.GetAll()) do pets[#pets + 1] = tostring(id) end
-                if #valid > 0 and #pets > 0 then
-                    local target = valid[math.random(#valid)]
-                    pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", target)
-                    pcall(G.Network.Fire, "Breakables_JoinPetBulk", { { [target] = pets } })
+                local targets = #focus > 0 and focus or valid
+                if #targets > 0 and #pets > 0 then
+                    -- sticky targets: a pet keeps hitting its breakable until it is
+                    -- gone; re-sending every pet every tick resets their attacks
+                    local alive, focusSet = {}, {}
+                    for _, n in ipairs(valid) do alive[n] = true end
+                    for _, n in ipairs(focus) do focusSet[n] = true end
+                    local load = {}
+                    for _, tg in pairs(assigned) do load[tg] = (load[tg] or 0) + 1 end
+                    local map, changed = {}, false
+                    local rr = 0
+                    for _, pet in ipairs(pets) do
+                        local cur = assigned[pet]
+                        -- move off a target that broke, or onto a focus target if one appeared
+                        if not cur or not alive[cur] or (#focus > 0 and not focusSet[cur]) then
+                            rr += 1
+                            local best, bestLoad
+                            for k = 1, #targets do
+                                local tg = targets[((rr + k) % #targets) + 1]
+                                local l = load[tg] or 0
+                                if not bestLoad or l < bestLoad then best, bestLoad = tg, l end
+                                if l == 0 then break end
+                            end
+                            if cur then load[cur] = (load[cur] or 1) - 1 end
+                            assigned[pet] = best
+                            load[best] = (load[best] or 0) + 1
+                            map[best] = map[best] or {}
+                            table.insert(map[best], pet)
+                            changed = true
+                        end
+                    end
+                    for pet in pairs(assigned) do if not table.find(pets, pet) then assigned[pet] = nil end end
+                    pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", targets[math.random(#targets)])
+                    if changed then pcall(G.Network.Fire, "Breakables_JoinPetBulk", map) end
                     hits += 1
-                    if hits % 30 == 0 then setStatus("farm", ("Farming %d breakables in range  ·  %d pets"):format(#valid, #pets)) end
+                    if hits % 20 == 0 then
+                        setStatus("farm", zoneLock and ("Farming %s for a quest  ·  %d breakables%s"):format(zoneLock, #valid, #focus > 0 and ("  ·  %d targets"):format(#focus) or "")
+                            or ("Farming %d breakables in range  ·  %d pets"):format(#valid, #pets))
+                    end
+                    task.wait(0.07)
                 else
-                    setStatus("farm", "No breakables within 100 studs")
+                    setStatus("farm", zoneLock and ("Waiting for breakables in " .. zoneLock) or "No breakables within 100 studs")
                     task.wait(0.5)
                 end
             end
@@ -2130,10 +2275,43 @@ end
 loop("equipbest", 30, function()
     if G.PetCmds and pcall(G.PetCmds.EquipBest) then setStatus("equipbest", "Equipped your best pets  ·  " .. os.date("%H:%M")) end
 end)
+-- ANTI AFK (same as the Pet Dimensions hub): a real Space key press through
+-- VirtualInputManager every N minutes, which resets both Roblox's 20 minute
+-- kick and the game's own idle detection. Idled is kept as a backup.
 do
+    local VIM = game:GetService("VirtualInputManager")
     local VU = game:GetService("VirtualUser")
+    local function press()
+        pcall(function()
+            VIM:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.1)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+        S.afkPresses = (S.afkPresses or 0) + 1
+        setStatus("antiafk", ("Pressed Space %d time%s  ·  last %s"):format(S.afkPresses, S.afkPresses == 1 and "" or "s", os.date("%H:%M:%S")))
+    end
+    F.afkPress = press
+    task.spawn(function()
+        while alive() do
+            if S.on.antiafk then
+                local interval = math.max(0.1, tonumber(Settings.values.afkMinutes) or 1) * 60
+                local elapsed = 0
+                while S.on.antiafk and alive() and elapsed < interval do
+                    local step = math.min(1, interval - elapsed)
+                    task.wait(step)
+                    elapsed += step
+                end
+                if S.on.antiafk and alive() then press() end
+            else
+                task.wait(0.25)
+            end
+        end
+    end)
     LocalPlayer.Idled:Connect(function()
-        if S.on.antiafk then pcall(function() VU:CaptureController() VU:ClickButton2(Vector2.new()) end) end
+        if S.on.antiafk then
+            pcall(function() VU:CaptureController() VU:ClickButton2(Vector2.new()) end)
+            press()
+        end
     end)
 end
 
@@ -2235,8 +2413,9 @@ loop("machines", 60, function()
     local sv, now = save(), workspace:GetServerTimeNow()
     local ready = {}
     for _, d in ipairs(map:GetDescendants()) do
-        if d:IsA("Model") and d.Parent and d.Parent.Name == "Machines" and G.Directory.TimedRewards[d.Name] then
-            local def, ts = G.Directory.TimedRewards[d.Name], sv.TimedRewardTimestamps[d.Name]
+        local def = d:IsA("Model") and d.Parent and d.Parent.Name == "Machines" and dirGet("TimedRewards", d.Name)
+        if def then
+            local ts = (sv.TimedRewardTimestamps or {})[d.Name]
             if (not ts or def.Cooldown < now - ts) and not (S.skipMachine or {})[d.Name] then ready[#ready + 1] = d end
         end
     end
@@ -2349,7 +2528,7 @@ loop("lootboxes", 8, function()
     for _, item in pairs(inventoryItems()) do
         local id = itemId(item)
         local okD, dir = pcall(function() return item:Directory() end)
-        if id and okD and type(dir) == "table" and G.Directory.Lootboxes[id] and not id:find("Locked") and not dir.IsCardPack then
+        if id and okD and type(dir) == "table" and dirGet("Lootboxes", id) and not id:find("Locked") and not dir.IsCardPack then
             local amt = math.min(item:GetAmount(), 5)
             if amt > 0 and pcall(G.LootboxCmds.Open, item, amt) then
                 S.counts.lootboxes += amt
@@ -2506,6 +2685,11 @@ loop("zones", 5, function()
         S.counts.zones += 1
         UI.toast("ZONE UNLOCKED", tostring(name), THEME.good)
         setStatus("zones", "Bought " .. tostring(name))
+        if S.on.areaegg ~= false then
+            task.wait(1.5)
+            local okZ, z = pcall(G.ZoneCmds.GetMaximumZone)
+            if okZ then F.hatchAreaEgg(z, "just bought") end
+        end
     else
         setStatus("zones", ("Next: %s  ·  %s"):format(tostring(name), tostring(msg or "saving up")))
     end
@@ -2538,11 +2722,8 @@ do
                 if okH and h and (e._position - root.Position).Magnitude < 160 then list[#list + 1] = e._id end
             end
         end)
-        local folder = G.THINGS:FindFirstChild("Eggs")
-        for _, m in ipairs(folder and folder:GetChildren() or {}) do
-            local okP, pos = pcall(function() return m:GetPivot().Position end)
-            local okD, dir = pcall(function() return G.Directory.Eggs[m.Name] end)
-            if okP and okD and dir and (pos - root.Position).Magnitude < 160 and not table.find(list, m.Name) then list[#list + 1] = m.Name end
+        for _, egg in ipairs(F.eggModels()) do
+            if (egg.pos - root.Position).Magnitude < 160 and not table.find(list, egg.id) then list[#list + 1] = egg.id end
         end
         return list
     end
@@ -2987,6 +3168,453 @@ loop("cocoa", 20, function()
         setStatus("cocoa", "Cocoa refused: " .. tostring(reason))
     end
 end)
+-- AUTO RANK QUESTS -----------------------------------------------------------
+-- Reads the four rank quests from your save, decides how to finish each one
+-- and does it. Anything that can be done from anywhere (potions, fruit, gold
+-- and rainbow machines, upgrades, gifts, diamonds) is done straight away.
+-- "Best area" quests only count in your best zone; when you run the hub in
+-- that world it parks you there, hatches the best egg and spawns your own
+-- comets / coin jars / pinatas / lucky blocks to finish them fast. It never
+-- travels to another world. Features it switches on for a quest are switched
+-- back off when no quest needs them any more.
+local Quest = { plans = {}, enabledByQuest = {} }
+env.__PS99HUB_QUEST = Quest
+do
+    local QuestTypes, QuestCmds
+    pcall(function() QuestTypes = require(RS.Library.Types.Quests) QuestCmds = require(RS.Library.Client.QuestCmds) end)
+    local GOAL = QuestTypes and QuestTypes.Goals or {}
+
+    local function title(goal)
+        local ok, s = pcall(QuestCmds.MakeTitle, goal, true)
+        return ok and s or ("Quest type " .. tostring(goal.Type))
+    end
+    local function bestZone()
+        local ok, z = pcall(G.ZoneCmds.GetMaximumZone)
+        return ok and type(z) == "table" and z or nil
+    end
+    local function worldNumber()
+        local ok, n = pcall(function() return require(RS.Library.Util.WorldsUtil).GetWorldNumber() end)
+        return ok and n or nil
+    end
+    local function inBestWorld()
+        local z = bestZone()
+        return z and not inInstance() and worldNumber() == z.WorldNumber
+    end
+    local function bestEggId()
+        local z = bestZone()
+        local fromZone = F.areaEgg(z)
+        if fromZone then return fromZone end
+        local sv = save()
+        for id, d in pairs(G.Directory.Eggs) do
+            if d.eggNumber == sv.MaximumAvailableEgg and not d.isCustomEgg then return id end
+        end
+    end
+    -- want(key): make sure a hub feature is running for a quest
+    local wanted = {}
+    local function want(key)
+        wanted[key] = true
+        local h = UI.handles and UI.handles[key]
+        if h and not h.get() then
+            Quest.enabledByQuest[key] = true
+            h.set(true, true)
+        end
+    end
+    local function itemsWhere(pred)
+        local out = {}
+        for _, item in pairs(inventoryItems()) do
+            local ok, keep = pcall(pred, item)
+            if ok and keep then out[#out + 1] = item end
+        end
+        return out
+    end
+    local function classOf(item)
+        local ok, c = pcall(function() return item.__class or (item:IsA("Potion") and "Potion") or (item:IsA("Fruit") and "Fruit") or (item:IsA("Pet") and "Pet") end)
+        return ok and c or nil
+    end
+    local function tierOf(item) local ok, t = pcall(function() return item:GetTier() end) return ok and t or 1 end
+
+    -- stand on the best zone (only ever inside the world you are already in)
+    local lastPark = 0
+    local function zoneLabel(z) return z and (z.ZoneName or z._id) or nil end
+    -- the area's floor: Map<world>/"<n> | <name>"/INTERACT/BREAK_ZONES/BREAK_ZONE
+    local function areaSlab(z)
+        for _, map in ipairs(workspace:GetChildren()) do
+            if map:IsA("Folder") and map.Name:match("^Map%d*$") then
+                local folder = map:FindFirstChild(z.ZoneFolder or "") or map:FindFirstChild(("%d | %s"):format(z.ZoneNumber or 0, tostring(z.ZoneName)))
+                local zones = folder and folder:FindFirstChild("INTERACT") and folder.INTERACT:FindFirstChild("BREAK_ZONES")
+                if zones then
+                    local biggest
+                    for _, part in ipairs(zones:GetChildren()) do
+                        if part:IsA("BasePart") and (not biggest or part.Size.X * part.Size.Z > biggest.Size.X * biggest.Size.Z) then biggest = part end
+                    end
+                    if biggest then return biggest end
+                end
+            end
+        end
+        return nil
+    end
+    local function parkInBestZone()
+        local z = bestZone()
+        local name = zoneLabel(z)
+        if not name then return false end
+        -- same as the tycoon: the point of the area's floor closest to its
+        -- egg, a few studs in from the edge, facing the egg
+        local slab = areaSlab(z)
+        local root = hrp()
+        if slab and root then
+            local top = slab.Size.Y / 2 + 3
+            local spot, face = slab.CFrame * CFrame.new(0, top, 0), nil
+            local eggPos = F.eggPosition(bestEggId() or "")
+            if eggPos then
+                local margin = 4
+                local rel = slab.CFrame:PointToObjectSpace(eggPos)
+                local hx, hz = math.max(0, slab.Size.X / 2 - margin), math.max(0, slab.Size.Z / 2 - margin)
+                local p = slab.CFrame:PointToWorldSpace(Vector3.new(math.clamp(rel.X, -hx, hx), top, math.clamp(rel.Z, -hz, hz)))
+                face = Vector3.new(eggPos.X, p.Y, eggPos.Z)
+                spot = (face - p).Magnitude > 0.5 and CFrame.lookAt(p, face) or CFrame.new(p)
+            end
+            Quest.parkSpot = spot.Position
+            if not moving and (root.Position - spot.Position).Magnitude > 6 and os.clock() - lastPark > 3 then
+                lastPark = os.clock()
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = spot
+            end
+            return true
+        end
+        -- the zone's own breakables say where it is, whatever the map is called
+        local sum, n, points = Vector3.zero, 0, {}
+        for _, b in ipairs(G.THINGS.Breakables:GetChildren()) do
+            if b:IsA("Model") and b:GetAttribute("ParentID") == name then
+                local ok, pos = pcall(function() return b:GetPivot().Position end)
+                if ok then sum += pos n += 1 points[#points + 1] = pos end
+            end
+        end
+        local root = hrp()
+        if n > 0 and root then
+            local centre = sum / n
+            -- stay INSIDE the area (pets only farm the area you stand in), on
+            -- the spot of the area closest to its egg: the area's breakable
+            -- nearest the egg, nudged a little toward it
+            local spot, face = centre + Vector3.new(0, 6, 0), nil
+            local eggPos = F.eggPosition(bestEggId() or "")
+            if eggPos then
+                local near, nearD
+                for _, pt in ipairs(points) do
+                    local d = (Vector3.new(pt.X, 0, pt.Z) - Vector3.new(eggPos.X, 0, eggPos.Z)).Magnitude
+                    if not nearD or d < nearD then near, nearD = pt, d end
+                end
+                if near then
+                    local flat = Vector3.new(eggPos.X - near.X, 0, eggPos.Z - near.Z)
+                    local step = flat.Magnitude > 0.1 and flat.Unit * math.min(4, flat.Magnitude * 0.25) or Vector3.zero
+                    spot = near + step + Vector3.new(0, 5, 0)
+                    face = Vector3.new(eggPos.X, spot.Y, eggPos.Z)
+                end
+            end
+            Quest.parkSpot = spot
+            if not moving and (root.Position - spot).Magnitude > 12 and os.clock() - lastPark > 4 then
+                lastPark = os.clock()
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.CFrame = face and CFrame.lookAt(spot, face) or CFrame.new(spot)
+            end
+            return true
+        end
+        local map = workspace:FindFirstChild("Map") or workspace:FindFirstChild("Map" .. tostring(worldNumber() or ""))
+        if not (z and map) then return false end
+        local folder
+        for _, f in ipairs(map:GetChildren()) do
+            if f.Name:find(z.ZoneName or z._id or "", 1, true) and (tostring(z.ZoneNumber) == f.Name:match("^(%d+)")) then folder = f break end
+        end
+        if not folder then
+            for _, f in ipairs(map:GetChildren()) do if f.Name:find(tostring(z._id), 1, true) then folder = f break end end
+        end
+        if not folder then return false end
+        local part
+        for _, d in ipairs(folder:GetDescendants()) do
+            if d:IsA("BasePart") and (d.Name == "BREAK_ZONE" or d.Parent.Name == "BREAK_ZONES" or d.Name:find("Break")) then part = d break end
+        end
+        part = part or (folder:FindFirstChild("PERSISTENT", true) and folder.PERSISTENT:FindFirstChild("Teleport"))
+        if not part then return false end
+        local root = hrp()
+        if root and not moving and (root.Position - part.Position).Magnitude > 60 and os.clock() - lastPark > 4 then
+            lastPark = os.clock()
+            root.CFrame = CFrame.new(part.Position + Vector3.new(0, 5, 0))
+        end
+        return true
+    end
+    local function standAtEgg(eggId)
+        local pos = eggId and F.eggPosition(eggId)
+        local root = hrp()
+        if not (pos and root) then return false end
+        if not moving and (root.Position - pos).Magnitude > 20 and os.clock() - lastPark > 4 then
+            lastPark = os.clock()
+            root.CFrame = CFrame.new(pos + Vector3.new(0, 3, 8), pos)
+        end
+        return true
+    end
+
+    -- one action per quest type; returns the line shown under that quest
+    local handlers = {}
+    local function useItems(goal, pred, consume, noun)
+        local left = goal.Amount - goal.Progress
+        local items = itemsWhere(pred)
+        table.sort(items, function(a, b) return tierOf(a) < tierOf(b) end)
+        local used = 0
+        for _, item in ipairs(items) do
+            if used >= left then break end
+            local n = math.min(left - used, item:GetAmount(), 10)
+            if pcall(consume, item, n) then used += n end
+            task.wait(0.4)
+        end
+        return used > 0 and ("Used %d %s"):format(used, noun) or ("No %s left to use"):format(noun)
+    end
+    handlers[GOAL.USE_POTION or -100] = function(goal)
+        return useItems(goal, function(i)
+            if classOf(i) ~= "Potion" then return false end
+            if goal.PotionID and i:GetId() ~= goal.PotionID then return false end
+            if goal.PotionTier and tierOf(i) ~= goal.PotionTier then return false end
+            return true
+        end, function(i, n) return G.PotionCmds.Consume(i:GetUID(), n) end, "potions")
+    end
+    handlers[GOAL.USE_FRUIT or -101] = function(goal)
+        return useItems(goal, function(i)
+            return classOf(i) == "Fruit" and (not goal.FruitID or i:GetId() == goal.FruitID)
+        end, function(i, n) return G.FruitCmds.Consume(i:GetUID(), n) end, "fruit")
+    end
+    handlers[GOAL.USE_FLAG or -102] = function(goal)
+        if inInstance() then return "Flags only work in a main-world zone" end
+        return useItems(goal, function(i) return tostring(i:GetId()):find("Flag$") ~= nil end,
+            function(i, n) return G.FlexibleFlagCmds.Consume(i:GetId(), i:GetUID(), 1) end, "flags")
+    end
+    local function upgrade(goal, kind)
+        local remote = kind == "Potion" and "UpgradePotionsMachine_Activate" or "UpgradeEnchantsMachine_Activate"
+        local machine = kind == "Potion" and "UpgradePotionsMachine" or "UpgradeEnchantsMachine"
+        local wantTier = goal.PotionTier or goal.EnchantTier
+        local id = goal.PotionID or goal.EnchantID
+        local items = itemsWhere(function(i)
+            local ok, isKind = pcall(function() return i:IsA(kind) end)
+            if not (ok and isKind) then return false end
+            if id and i:GetId() ~= id then return false end
+            if wantTier and tierOf(i) ~= wantTier - 1 then return false end
+            return i:GetAmount() >= 3
+        end)
+        table.sort(items, function(a, b) return tierOf(a) < tierOf(b) end)
+        local item = items[1]
+        if not item then return ("Not enough %ss to upgrade"):format(kind:lower()) end
+        local n = math.min(goal.Amount - goal.Progress, math.floor(item:GetAmount() / 3))
+        local uid = item:GetUID()
+        local ok, msg = invoke(remote, uid, n)
+        if not ok and tostring(msg):lower():find("far") and not inInstance() then
+            local map = workspace:FindFirstChild("Map")
+            local pad
+            for _, d in ipairs(map and map:GetDescendants() or {}) do
+                if d.Name == machine and d:IsA("Model") then pad = d:FindFirstChild("Pad") or d:FindFirstChildWhichIsA("BasePart", true) break end
+            end
+            if pad then
+                withTeleport(function(root)
+                    root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
+                    task.wait(0.8)
+                    ok, msg = invoke(remote, uid, n)
+                end)
+            end
+        end
+        return ok and ("Upgraded %d %s"):format(n, item:GetId()) or ("Upgrade refused: " .. tostring(msg))
+    end
+    handlers[GOAL.UPGRADE_POTION or -103] = function(goal) return upgrade(goal, "Potion") end
+    handlers[GOAL.UPGRADE_ENCHANT or -104] = function(goal) return upgrade(goal, "Enchant") end
+    local function machinePets(goal, wantPt, remote, fromBestEgg)
+        local bestSet
+        if fromBestEgg then
+            local egg = dirGet("Eggs", bestEggId() or "")
+            bestSet = {}
+            for _, p in ipairs(egg and egg.pets or {}) do bestSet[p[1]] = true end
+        end
+        local left = goal.Amount - goal.Progress
+        local pick
+        for uid, pet in pairs(save().Inventory.Pet or {}) do
+            if pet.pt == wantPt and not pet.sh and (pet._am or 1) >= 10 and not pet._lk
+                and (not bestSet or bestSet[pet.id]) and not (Chances.petInfo(pet.id) or {}).huge then
+                if not pick or (pet._am or 1) > pick.amount then pick = { uid = uid, id = pet.id, amount = pet._am or 1 } end
+            end
+        end
+        if not pick then
+            return fromBestEgg and "Need 10 of one pet from your best egg (hatch more of it)" or "Need 10 of one pet"
+        end
+        local batches = math.min(left, math.floor(pick.amount / 10))
+        local ok, msg = invoke(remote, pick.uid, batches)
+        return ok and ("Made %d from %s"):format(batches, pick.id) or ("Machine refused: " .. tostring(msg))
+    end
+    handlers[GOAL.GOLD_PET or -105] = function(goal) return machinePets(goal, nil, "GoldMachine_Activate", false) end
+    handlers[GOAL.RAINBOW_PET or -106] = function(goal) return machinePets(goal, 1, "RainbowMachine_Activate", false) end
+    handlers[GOAL.BEST_GOLD_PET or -107] = function(goal)
+        if GOAL.BEST_EGG and inBestWorld() then want("hatch") standAtEgg(bestEggId()) end
+        return machinePets(goal, nil, "GoldMachine_Activate", true)
+    end
+    handlers[GOAL.BEST_RAINBOW_PET or -108] = function(goal)
+        return machinePets(goal, 1, "RainbowMachine_Activate", true)
+    end
+    -- collected from breakables, gifts and lootboxes: farm + open everything
+    local function farmFor(goal, extra)
+        if Tycoon.plot() then
+            if S.on.tycoonfarm then return "Farming the tycoon (main-world drops count here only in the main world)" end
+        end
+        if not inInstance() then want("farm") end
+        want("giftbags")
+        if extra then extra() end
+        return inInstance() and "Opening gift bags (farm counts in the main world)" or "Farming breakables + opening gift bags"
+    end
+    for _, name in ipairs({ "COLLECT_POTION", "COLLECT_ENCHANT", "COLLECT_FRUIT", "COLLECT_LOOTBAG", "CURRENCY", "OBTAIN_CURRENCY",
+        "BREAKABLE", "DIAMOND_BREAKABLE", "MINI_CHEST" }) do
+        if GOAL[name] then handlers[GOAL[name]] = function(goal) return farmFor(goal) end end
+    end
+    if GOAL.FREE_GIFT then handlers[GOAL.FREE_GIFT] = function() want("freegifts") return "Claiming free gifts as they unlock" end end
+    if GOAL.ZONE then handlers[GOAL.ZONE] = function() if inInstance() then return "Zones are bought in the main world" end want("zones") return "Buying the next zone when affordable" end end
+    -- hatching
+    local function hatchQuest(goal, eggId)
+        want("hatch")
+        if eggId and not inInstance() then
+            if standAtEgg(eggId) then return "Hatching " .. eggId end
+            return ("%s is not in this world"):format(eggId)
+        end
+        return "Hatching the egg you are next to"
+    end
+    if GOAL.EGG then handlers[GOAL.EGG] = function(goal) return hatchQuest(goal, goal.EggID) end end
+    if GOAL.PET then handlers[GOAL.PET] = function(goal) return hatchQuest(goal, nil) end end
+    if GOAL.HATCH_RARE_PET then handlers[GOAL.HATCH_RARE_PET] = function(goal)
+        if inBestWorld() then return hatchQuest(goal, bestEggId()) end
+        return hatchQuest(goal, nil)
+    end end
+    if GOAL.BEST_EGG then handlers[GOAL.BEST_EGG] = function(goal)
+        if not inBestWorld() then return nil end
+        return hatchQuest(goal, bestEggId())
+    end end
+    -- best area: break things there, spawning your own event items to speed it up
+    -- Lua patterns, anchored, so "Comet" never matches "Comet Cyclops Ball"
+    local SPAWNERS = {
+        BEST_COMET = { "^Comet$", "Comet_Spawn" }, COMET = { "^Comet$", "Comet_Spawn" },
+        BEST_COIN_JAR = { "^%a+ Coin Jar$", "CoinJar_Spawn" }, COIN_JAR = { "^%a+ Coin Jar$", "CoinJar_Spawn" },
+        BEST_PINATA = { "^Mini Pinata$", "MiniPinata_Consume" }, PINATA = { "^Mini Pinata$", "MiniPinata_Consume" },
+        BEST_LUCKYBLOCK = { "^Mini Lucky Block$", "MiniLuckyBlock_Consume" }, LUCKYBLOCK = { "^Mini Lucky Block$", "MiniLuckyBlock_Consume" },
+    }
+    local lastSpawn = {}
+    local function spawnOwn(kind)
+        local spec = SPAWNERS[kind]
+        if not spec or os.clock() - (lastSpawn[kind] or 0) < 20 then return false end
+        for _, item in pairs(inventoryItems()) do
+            local id = itemId(item)
+            if id and id:match(spec[1]) then
+                lastSpawn[kind] = os.clock()
+                return (invoke(spec[2], item:GetUID())) and true or false, id
+            end
+        end
+        return false
+    end
+    local FOCUS = {
+        BEST_MINI_CHEST = { "Mini Chest", "Chest" }, BEST_SUPERIOR_MINI_CHEST = { "Superior Mini Chest", "Superior" },
+        BEST_COMET = { "Comet" }, BEST_COIN_JAR = { "Coin Jar", "Jar" }, BEST_PINATA = { "Pinata", "Piñata" },
+        BEST_LUCKYBLOCK = { "Lucky Block", "LuckyBlock", "Lucky" },
+    }
+    for _, name in ipairs({ "CURRENT_BREAKABLE", "BEST_MINI_CHEST", "BEST_SUPERIOR_MINI_CHEST", "BEST_COMET", "BEST_COIN_JAR", "BEST_PINATA", "BEST_LUCKYBLOCK" }) do
+        if GOAL[name] then handlers[GOAL[name]] = function(goal)
+            if not inBestWorld() then return nil end
+            local bz = bestZone()
+            local eggId = F.areaEgg(bz)
+            local hatched = 0
+            pcall(function() hatched = (save().PurchasedEggs or {})[eggId or ""] or 0 end)
+            if eggId and hatched == 0 then
+                local ok, msg = F.hatchAreaEgg(bz, "rank quest")
+                if not ok then return "Hatching the area egg first: " .. tostring(msg) end
+            end
+            parkInBestZone()
+            want("farm")
+            Quest.zoneLock = zoneLabel(bz)
+            if FOCUS[name] then
+                for _, w in ipairs(FOCUS[name]) do table.insert(Quest.focus, w) end
+            end
+            local spawned, what = spawnOwn(name)
+            if spawned then return ("Spawned your %s in the best area"):format(what) end
+            return "Farming the best area"
+        end end
+    end
+    for _, name in ipairs({ "COMET", "COIN_JAR", "PINATA", "LUCKYBLOCK" }) do
+        if GOAL[name] then handlers[GOAL[name]] = function(goal)
+            if inInstance() then return "Needs a main-world zone" end
+            want("farm")
+            local spawned, what = spawnOwn(name)
+            return spawned and ("Spawned your " .. what) or "Farming (spawns your own when available)"
+        end end
+    end
+
+    loop("autoquest", 3, function()
+        local goals = save().Goals
+        if type(goals) ~= "table" then return setStatus("autoquest", "No rank quests found") end
+        table.clear(wanted)
+        Quest.zoneLock, Quest.focus = nil, {}
+        local plans, done, blocked = {}, 0, 0
+        local bz = bestZone()
+        local slots = {}
+        for slot in pairs(goals) do slots[#slots + 1] = slot end
+        table.sort(slots, function(a, b) return tostring(a) < tostring(b) end)
+        for _, slot in ipairs(slots) do
+            local goal = goals[slot]
+            local plan = { title = title(goal), progress = goal.Progress or 0, amount = goal.Amount or 1, stars = goal.Stars }
+            if (goal.Progress or 0) >= (goal.Amount or 1) then
+                plan.text, plan.state = "Done - waiting for the game to hand out the next one", "done"
+                done += 1
+            else
+                local h = handlers[goal.Type]
+                local okH, text = false, nil
+                if h then okH, text = pcall(h, goal) end
+                if not h then
+                    plan.text, plan.state = "This quest type can't be automated (do it by hand)", "manual"
+                    blocked += 1
+                elseif not okH then
+                    plan.text, plan.state = "Error: " .. tostring(text):sub(1, 80), "error"
+                elseif text == nil then
+                    plan.text = ("Only counts in your best area (%s). Run the hub in that world."):format(bz and (bz.ZoneName or bz._id) or "best zone")
+                    plan.state = "blocked"
+                    blocked += 1
+                else
+                    plan.text, plan.state = text, "working"
+                end
+            end
+            plans[#plans + 1] = plan
+        end
+        Quest.plans = plans
+        S.farmZone = Quest.zoneLock
+        S.farmFocus = #Quest.focus > 0 and Quest.focus or nil
+        -- hand back anything a quest switched on that no quest wants now
+        for key in pairs(Quest.enabledByQuest) do
+            if not wanted[key] then
+                Quest.enabledByQuest[key] = nil
+                local h = UI.handles and UI.handles[key]
+                if h and h.get() then h.set(false, true) end
+            end
+        end
+        setStatus("autoquest", ("%d/%d done  ·  %d need the best area or your hands  ·  rank %s, %s stars"):format(done, #plans, blocked, tostring(save().Rank), tostring(save().RankStars)))
+    end)
+    -- turning auto quests off gives back what it switched on
+    function Quest.release()
+        S.farmZone, S.farmFocus = nil, nil
+        for key in pairs(Quest.enabledByQuest) do
+            local h = UI.handles and UI.handles[key]
+            if h and h.get() then h.set(false, true) end
+        end
+        table.clear(Quest.enabledByQuest)
+    end
+end
+loop("areaegg", 8, function()
+    if inInstance() then return setStatus("areaegg", "Waiting for the main world") end
+    local okZ, z = pcall(G.ZoneCmds.GetMaximumZone)
+    if not (okZ and type(z) == "table") then return end
+    local okW, w = pcall(function() return require(RS.Library.Util.WorldsUtil).GetWorldNumber() end)
+    if not okW or w ~= z.WorldNumber then return setStatus("areaegg", "Your best area is in another world") end
+    local eggId = F.areaEgg(z)
+    local done = 0
+    pcall(function() done = (save().PurchasedEggs or {})[eggId or ""] or 0 end)
+    if eggId and done > 0 then return setStatus("areaegg", ("%s egg hatched (%s)  ·  %s"):format(tostring(z.ZoneName), eggId, commas(done))) end
+    F.hatchAreaEgg(z, "best area")
+end)
+
 -- PANIC ------------------------------------------------------------------
 function F.stopAll()
     local n = 0
@@ -3299,7 +3927,79 @@ do
         end)
     end
 
-    local rewards = UI.tab("Rewards", 3)
+    -- QUESTS: rank quests with live progress and what the solver is doing
+    local questTab = UI.tab("Quests", 3)
+    s = UI.section(questTab, "Rank quests", THEME.gold)
+    UI.toggle(s, "autoquest", "Auto Rank Quests", "Works out each rank quest and finishes it the fastest way it can", false, function(on)
+        if not on then Quest.release() end
+    end)
+    UI.status(s, "autoquest", "Off")
+    do
+        local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
+        local cards = {}
+        local STATE_COLOUR = {
+            done = Color3.fromRGB(150, 230, 170), working = THEME.accent, blocked = Color3.fromRGB(255, 190, 110),
+            manual = THEME.muted, error = Color3.fromRGB(255, 120, 130),
+        }
+        for i = 1, 4 do
+            s.n += 1
+            local c = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 66), BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.55, ZIndex = 4 }, s.frame)
+            corner(c, 12)
+            UI.glassAdd(c)
+            local cs = stroke(c, THEME.stroke, 0.6)
+            local stars = label(c, { text = "", font = Enum.Font.GothamBlack, size = 11, colour = THEME.gold, align = Enum.TextXAlignment.Right,
+                anchor = Vector2.new(1, 0), sz = UDim2.fromOffset(120, 16), pos = UDim2.new(1, -14, 0, 9), z = 5 })
+            local name = label(c, { text = "-", font = Enum.Font.GothamBold, size = 14, sz = UDim2.new(1, -150, 0, 18), pos = UDim2.fromOffset(14, 8), z = 5 })
+            local plan = label(c, { text = "", size = 11, colour = THEME.muted, sz = UDim2.new(1, -28, 0, 14), pos = UDim2.fromOffset(14, 28), z = 5 })
+            local track = new("Frame", { Position = UDim2.fromOffset(14, 48), Size = UDim2.new(1, -110, 0, 6), BackgroundColor3 = THEME.surface, BackgroundTransparency = 0.3, ZIndex = 5 }, c)
+            corner(track, 3)
+            local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = THEME.accent, ZIndex = 6 }, track)
+            corner(fill, 3)
+            local count = label(c, { text = "", font = Enum.Font.GothamBlack, size = 11, align = Enum.TextXAlignment.Right,
+                anchor = Vector2.new(1, 0), sz = UDim2.fromOffset(90, 14), pos = UDim2.new(1, -14, 0, 44), z = 5 })
+            cards[i] = { frame = c, stroke = cs, stars = stars, name = name, plan = plan, fill = fill, count = count }
+        end
+        local function paint()
+            local plans = Quest.plans
+            if #plans == 0 then
+                -- show the quests even when the solver is off
+                local goals = save().Goals or {}
+                local slots = {}
+                for slot in pairs(goals) do slots[#slots + 1] = slot end
+                table.sort(slots, function(a, b) return tostring(a) < tostring(b) end)
+                plans = {}
+                for _, slot in ipairs(slots) do
+                    local g = goals[slot]
+                    local okT, ttl = pcall(function() return require(RS.Library.Client.QuestCmds).MakeTitle(g, true) end)
+                    plans[#plans + 1] = { title = okT and ttl or ("Quest " .. tostring(g.Type)), progress = g.Progress or 0, amount = g.Amount or 1, stars = g.Stars, text = "Turn on Auto Rank Quests", state = "manual" }
+                end
+            end
+            for i, card in ipairs(cards) do
+                local p = plans[i]
+                card.frame.Visible = p ~= nil
+                if p then
+                    local colour = STATE_COLOUR[p.state] or THEME.muted
+                    card.name.Text = p.title
+                    card.plan.Text = p.text or ""
+                    card.plan.TextColor3 = colour
+                    card.stars.Text = p.stars and (("%d STAR%s"):format(p.stars, p.stars == 1 and "" or "S")) or ""
+                    local frac = math.clamp(p.progress / math.max(1, p.amount), 0, 1)
+                    card.fill.Size = UDim2.fromScale(frac, 1)
+                    card.fill.BackgroundColor3 = colour
+                    card.count.Text = ("%s / %s"):format(commas(p.progress), commas(p.amount))
+                    card.stroke.Color = p.state == "done" and colour or THEME.stroke
+                end
+            end
+        end
+        task.spawn(function()
+            while alive() do
+                if questTab.page.Visible and UI.win.Visible then pcall(paint) end
+                task.wait(1)
+            end
+        end)
+    end
+
+    local rewards = UI.tab("Rewards", 4)
     s = UI.section(rewards, "Daily claims", THEME.gold)
     UI.toggle(s, "freegifts", "Auto Free Gifts", "Claims each play-time gift the moment it unlocks", true)
     UI.status(s, "freegifts", "")
@@ -3335,7 +4035,7 @@ do
     UI.status(s, "vending", "")
     UI.toggle(s, "vendingdiamonds", "Include Diamond Machines", "Rare potion / enchant machines that cost diamonds", false)
 
-    local items = UI.tab("Items", 4)
+    local items = UI.tab("Items", 5)
     s = UI.section(items, "Boosts", THEME.good)
     UI.toggle(s, "potions", "Auto Potions", "Keeps one of every potion type running, best tier first", false)
     UI.status(s, "potions", "")
@@ -3360,17 +4060,19 @@ do
     UI.toggle(s, "tnt", "Auto TNT", nil, false)
     UI.status(s, "tnt", "")
 
-    local pets = UI.tab("Pets", 5)
+    local pets = UI.tab("Pets", 6)
     s = UI.section(pets, "Machines", THEME.gold)
     UI.toggle(s, "golden", "Auto Golden", "Turns every 10 of a normal pet into a golden one (skips huges)", false)
     UI.status(s, "golden", "")
     UI.toggle(s, "rainbow", "Auto Rainbow", "Turns every 10 goldens into a rainbow (skips huges)", false)
     UI.status(s, "rainbow", "")
 
-    local progress = UI.tab("Progress", 6)
+    local progress = UI.tab("Progress", 7)
     s = UI.section(progress, "Unlocks", THEME.good)
     UI.toggle(s, "zones", "Auto Buy Next Zone", "Buys the next zone in this world as soon as you can afford it", false)
     UI.status(s, "zones", "")
+    UI.toggle(s, "areaegg", "Hatch Each New Area's Egg", "Goes to the egg tied to your newest area and hatches it once", true)
+    UI.status(s, "areaegg", "")
     UI.toggle(s, "rebirth", "Auto Rebirth", "Rebirths when the next one is available", false)
     UI.status(s, "rebirth", "")
     s = UI.section(progress, "Slots", THEME.gold)
@@ -3380,13 +4082,16 @@ do
     UI.status(s, "eggslots", "")
     UI.slider(s, "slotReserve", "Keep at least (million diamonds)", 0, 50, 2, 1)
 
-    local misc = UI.tab("Misc", 7)
+    local misc = UI.tab("Misc", 8)
     s = UI.section(misc, "Player", Color3.fromRGB(140, 210, 255))
-    UI.toggle(s, "antiafk", "Anti AFK", "Stops Roblox kicking you for idling", true)
+    UI.toggle(s, "antiafk", "Anti AFK", "Presses Space every few minutes, like the Pet Dimensions hub", true)
+    UI.status(s, "antiafk", "")
+    UI.slider(s, "afkMinutes", "Anti AFK every (minutes)", 1, 15, 1, 1)
     UI.toggle(s, "walkspeed", "Custom Walk Speed", nil, false)
     UI.slider(s, "walkspeedValue", "Walk speed", 16, 120, 40, 1, function(v) walkSpeed = v end)
     s = UI.section(misc, "Interface", THEME.accent)
     UI.slider(s, "glass", "Glass opacity %", 10, 200, 100, 5, function(v) UI.setGlass(v) end)
+    UI.slider(s, "sceneFps", "Background animation FPS (0 = still)", 0, 60, 24, 6, function(v) UI.sceneFps = v end)
     UI.keybind(s, "hide", "Show / hide hub", "LeftControl")
     UI.keybind(s, "panic", "Stop everything", "End")
     UI.keybind(s, "palette", "Search palette", "Backquote")
