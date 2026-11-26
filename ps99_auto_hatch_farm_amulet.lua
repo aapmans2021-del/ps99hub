@@ -1844,7 +1844,7 @@ task.spawn(function()
         -- fast lane: tiny, frequent checks (ultimate, tycoon buys, wild throws)
         -- don't wait behind the heavier features
         for _, l in ipairs(loops) do
-            if l.interval <= 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap") then
+            if l.interval <= 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap" or l.key == "hugecatch") then
                 l.next = now + l.interval
                 l.running = true
                 task.spawn(function()
@@ -1859,7 +1859,7 @@ task.spawn(function()
             for offset = 0, total - 1 do
                 local index = ((loopCursor + offset - 1) % total) + 1
                 local l = loops[index]
-                if l.interval > 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap") then
+                if l.interval > 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap" or l.key == "hugecatch") then
                     l.next = now + l.interval
                     l.running = true
                     activeLoopWorkers += 1
@@ -3975,6 +3975,99 @@ do
         setStatus("wildcatch", ("%s  ·  caught %d / %d throws%s"):format(lastText or "Throwing", WildStats.caught, WildStats.throws,
             WildStats.huges > 0 and ("  ·  %d HUGE"):format(WildStats.huges) or ""))
     end)
+
+    -- AUTO CATCH HUGES (its own switch) ---------------------------------------
+    -- Turkey sightings are huge or better and spawn in a ring right around
+    -- you (also in the arena when a turkey goes down), so they're caught any
+    -- time - even mid-fight. Wild huges on your island are caught the moment
+    -- they spawn. One throw per pet, Ultra Net first.
+    function F.catchSighting()
+        local okT, Tk = pcall(function() return require(RS.Library.Client.PumpkinTycoonCmds.Turkey) end)
+        if not okT or not Tk.Sighting() then return nil end
+        local okU, cur = pcall(debug.getupvalue, Tk.Sighting, 1)
+        if not okU or type(cur) ~= "table" or typeof(cur.spot) ~= "Vector3" or cur.hubTried then return nil end
+        local petId = type(cur.entry) == "table" and tostring(cur.entry.P) or "a huge"
+        local ultras, nets = itemCount("Ultra Pet Net"), itemCount("Pet Net")
+        local net = ultras > 0 and "Ultra Pet Net" or (nets > 0 and "Pet Net") or nil
+        if not net then return false, petId .. " sighting is up - no nets left", petId end
+        cur.hubTried = true
+        local root = hrp()
+        if not root then return nil end
+        local back = root.CFrame
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = CFrame.new(cur.spot + Vector3.new(0, 3, 0))
+        task.wait(0.35)
+        local ok, a, b = pcall(Tk.Throw, net)
+        task.wait(0.4)
+        root.CFrame = back
+        WildStats.throws += 1
+        local text = ("%s sighting: threw a%s %s%s"):format(petId, net == "Ultra Pet Net" and "n" or "", net,
+            (ok and b) and (" (" .. tostring(b) .. ")") or (not ok and (" - " .. tostring(a)) or ""))
+        UI.toast("HUGE SIGHTING", text, THEME.gold)
+        return ok and a ~= false, text, petId
+    end
+    loop("hugecatch", 0.5, function()
+        local plot, _, m = Tycoon.plot()
+        if not plot then return setStatus("hugecatch", "Only works inside the Pumpkin Tycoon") end
+        local r, msg = F.catchSighting()
+        if r ~= nil then return setStatus("hugecatch", msg) end
+        if S.turkeyFight then return setStatus("hugecatch", "Watching for a huge+ sighting during the turkey fight") end
+        local okW, Wild = pcall(m.Cmds.Feature, "Wild")
+        if not (okW and Wild) then return setStatus("hugecatch", "Watching for huge+ sightings") end
+        if os.clock() - WildStats.lastThrow < throwCooldown() then return end
+        local nets, ultras = itemCount("Pet Net"), itemCount("Ultra Pet Net")
+        local saved = {}
+        pcall(function() saved = plot:Save(m.Types.VAR.Wild) or {} end)
+        local loaded, zoneOf = {}, {}
+        for slot in pairs(Wild.All() or {}) do loaded[tostring(slot)] = true end
+        local unloadedZone
+        for slot, w in pairs(saved) do
+            if type(w) == "table" and w.P then
+                zoneOf[tostring(slot)] = w.Z
+                if bigTier(w.P) > 0 and not loaded[tostring(slot)] then unloadedZone = unloadedZone or w.Z end
+            end
+        end
+        local huges = {}
+        for _, c in ipairs(candidates(Wild, plot, m, nets, ultras, attemptedPets, zoneOf)) do
+            if c.tier > 0 then huges[#huges + 1] = c end
+        end
+        if #huges == 0 then
+            -- a huge spawned somewhere that hasn't streamed in: go load it
+            if unloadedZone and os.clock() - (WildStats.lastHugeScout or 0) > 6 then
+                WildStats.lastHugeScout = os.clock()
+                local _, myModel = Tycoon.plot()
+                local area = myModel and myModel:FindFirstChild("WildAreas") and myModel.WildAreas:FindFirstChild("WildArea_" .. tostring(unloadedZone))
+                if area then withTeleport(function(root) root.CFrame = CFrame.new(area.Position + Vector3.new(0, 5, 0)) task.wait(1.2) end) end
+                return setStatus("hugecatch", "A huge+ spawned in zone " .. tostring(unloadedZone) .. " - loading it")
+            end
+            return setStatus("hugecatch", ("Watching for huges  ·  %d caught this session"):format(WildStats.huges))
+        end
+        local text
+        withTeleport(function(root)
+            for i, c in ipairs(huges) do
+                if S.turkeyFight then break end
+                if i > 1 then
+                    local wait = throwCooldown() - (os.clock() - WildStats.lastThrow)
+                    if wait > 0 then task.wait(wait) end
+                end
+                attemptedPets[c.phys] = true
+                local caught, err = throwAt(plot, m, root, c)
+                WildStats.throws += 1
+                if caught then
+                    WildStats.caught += 1
+                    WildStats.huges += 1
+                    text = ("Caught %s%s!"):format(c.variant, c.pet)
+                    UI.toast("HUGE CAUGHT!", c.variant .. c.pet, THEME.gold)
+                elseif caught == false then
+                    WildStats.missed += 1
+                    text = ("Missed %s%s (one throw per pet)"):format(c.variant, c.pet)
+                else
+                    text = ("%s: %s"):format(c.pet, tostring(err))
+                end
+            end
+        end)
+        setStatus("hugecatch", (text or "Throwing") .. ("  ·  %d huges caught"):format(WildStats.huges))
+    end)
 end
 -- EXTRA CLAIMS -------------------------------------------------------------
 loop("extraclaims", 30, function()
@@ -4376,6 +4469,7 @@ env.__PS99HUB_TURKEY = Turkey
 -- A rare wild pet (huge or better) that wanders on your island for a short
 -- time. It's always worth an Ultra Net, so it gets one if you have any.
 loop("turkeysighting", 2, function()
+    if S.on.hugecatch then return setStatus("turkeysighting", "Handled by Auto Catch Huges") end
     if S.turkeyFight or (S.on.turkeyboss and F.turkeyUp and F.turkeyUp()) then
         return setStatus("turkeysighting", "Waiting - the Turkey is being fought")
     end
@@ -4674,6 +4768,21 @@ loop("turkeyboss", 0.5, function()
     EventFocus.start(t, "the Turkey", CFrame.new(pos + Vector3.new(0, 5, 24), pos), "turkeyboss", function()
         -- still up and still wanted: stay in the arena, the next tick picks it up again
         if S.on.turkeyboss and findTurkey() then return end
+        -- a huge+ sighting can spawn right where the turkey went down: wait
+        -- for it before leaving the arena
+        if S.on.hugecatch and F.catchSighting then
+            setStatus("turkeyboss", "Turkey down - checking for a huge+ spawn")
+            local t1 = os.clock()
+            while os.clock() - t1 < 8 and alive() do
+                local r, msg = F.catchSighting()
+                if r ~= nil then
+                    setStatus("hugecatch", msg)
+                    task.wait(1)
+                    break
+                end
+                task.wait(0.25)
+            end
+        end
         S.turkeyFight = false
         if S.on.enchantswap and Enchants then pcall(Enchants.apply, false) end
         EventFocus.goBack(back)
@@ -5778,6 +5887,8 @@ do
     end)
     UI.status(s, "lasthatch", "Off")
     s = UI.section(eventTab, "Wild pets & sightings", Color3.fromRGB(255, 170, 90))
+    UI.toggle(s, "hugecatch", "Auto Catch Huges", "Huge+ wild spawns and sightings the moment they appear - also right after a turkey fight. Separate from wild catch", true)
+    UI.status(s, "hugecatch", "Off")
     UI.toggle(s, "turkeysighting", "Auto Catch Turkey Sightings", "Throws a net at the rare huge+ sighting on your island (Ultra first)", false)
     UI.status(s, "turkeysighting", "Off")
     UI.toggle(s, "wildalerts", "Wild Huge Alerts", "Toast (and a Discord ping if the webhook is on) when a huge+ wild pet spawns on your island", true)
