@@ -1,6 +1,6 @@
 --[[
    PET SIMULATOR 99 HUB
-   Same look as the Pet Dimensions hub: Sakura Dusk window over the animated
+   Sakura Dusk window over the animated
    mountain scene, numbered sidebar tabs with a sliding glider, section cards,
    spring switches, a command palette (` key), toasts and saved settings.
 
@@ -27,7 +27,7 @@ repeat task.wait() until not LocalPlayer.PlayerGui:FindFirstChild("__INTRO")
 
 -- =====================================================================
 -- STARTUP SCENE: SAKURA DUSK
--- Shared by the key gate and the loading screen so the hand-off reads as
+-- Shared by the loading screen and the hub window so the hand-off reads as
 -- one shot. A dusk sky with drifting sunset cloud, a haloed moon, four
 -- depths of mountains with mist between them (a far ridge, Mount Fuji with
 -- a snow cap and gullies, a jagged mid range, tree-lined near hills), a
@@ -35,9 +35,9 @@ repeat task.wait() until not LocalPlayer.PlayerGui:FindFirstChild("__INTRO")
 -- drifting up, and branching sakura trees with weeping blossom strands
 -- framing the view while petals fall. UI has no triangles, so every
 -- mountain is drawn as a run of thin vertical slices.
--- pdBuildScene(parent) -> { frame, setSpeed(n), stop() }
+-- buildScene(parent) -> { frame, setSpeed(n), stop() }
 -- =====================================================================
-local function pdBuildScene(parent, opts)
+local function buildScene(parent, opts)
     opts = type(opts) == "table" and opts or {}
     local RunService = game:GetService("RunService")
     local HORIZON = 0.68
@@ -660,6 +660,101 @@ local function pdBuildScene(parent, opts)
 end
 
 ----------------------------------------------------------------------
+-- LOADING SCREEN
+-- A card over the Sakura scene with the hub's logo, a status line and a
+-- progress bar that follows the startup steps, then fades into the hub.
+----------------------------------------------------------------------
+local Loader = { pct = 0 }
+do
+    local ok = pcall(function()
+        local pg = LocalPlayer:WaitForChild("PlayerGui")
+        for _, old in ipairs(pg:GetChildren()) do if old.Name == "PS99HubLoader" then old:Destroy() end end
+        local function make(class, props, parent)
+            local o = Instance.new(class)
+            for k, v in pairs(props) do o[k] = v end
+            o.Parent = parent
+            return o
+        end
+        local PINK, MUTED, TEXT = Color3.fromRGB(255, 150, 190), Color3.fromRGB(206, 160, 182), Color3.fromRGB(255, 238, 244)
+        local gui = make("ScreenGui", { Name = "PS99HubLoader", ResetOnSpawn = false, IgnoreGuiInset = true,
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 100 }, pg)
+        local dim = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 1, BorderSizePixel = 0 }, gui)
+        local card = make("CanvasGroup", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 18), Size = UDim2.fromOffset(560, 320),
+            BackgroundColor3 = Color3.fromRGB(22, 14, 30), GroupTransparency = 1, BorderSizePixel = 0 }, gui)
+        make("UICorner", { CornerRadius = UDim.new(0, 22) }, card)
+        local scale = make("UIScale", {}, card)
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+        scale.Scale = math.clamp(math.min(vp.X / 1280, vp.Y / 720) * 1.1, 0.6, 1.4)
+        local edge = make("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 18), Size = UDim2.fromOffset(560, 320),
+            BackgroundTransparency = 1 }, gui)
+        make("UICorner", { CornerRadius = UDim.new(0, 22) }, edge)
+        local edgeStroke = make("UIStroke", { Color = PINK, Transparency = 1, Thickness = 1.6 }, edge)
+        make("UIScale", { Scale = scale.Scale }, edge)
+
+        local scene = buildScene(card, { detail = 0.3, noSway = true, fps = function() return 30 end })
+        make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(16, 10, 24), BackgroundTransparency = 0.45, BorderSizePixel = 0, ZIndex = 5 }, card)
+
+        local logo = make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 44), Size = UDim2.fromOffset(74, 74), Rotation = -5,
+            BackgroundColor3 = Color3.fromRGB(214, 52, 58), ZIndex = 6 }, card)
+        make("UICorner", { CornerRadius = UDim.new(0, 16) }, logo)
+        make("UIStroke", { Color = Color3.fromRGB(255, 236, 220), Transparency = 0.5, Thickness = 2 }, logo)
+        make("TextLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "99", Font = Enum.Font.GothamBlack, TextSize = 30,
+            TextColor3 = Color3.fromRGB(255, 236, 220), ZIndex = 7 }, logo)
+        make("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 132), Size = UDim2.new(1, -40, 0, 30), BackgroundTransparency = 1,
+            Text = "PET SIMULATOR 99", Font = Enum.Font.GothamBlack, TextSize = 26, TextColor3 = TEXT, ZIndex = 6 }, card)
+        make("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 164), Size = UDim2.new(1, -40, 0, 16), BackgroundTransparency = 1,
+            Text = "H U B", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = PINK, ZIndex = 6 }, card)
+        local status = make("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 226), Size = UDim2.new(1, -80, 0, 18), BackgroundTransparency = 1,
+            Text = "Waiting for the game", Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = MUTED, ZIndex = 6 }, card)
+        local track = make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 254), Size = UDim2.new(1, -120, 0, 8),
+            BackgroundColor3 = Color3.fromRGB(60, 36, 64), BorderSizePixel = 0, ZIndex = 6 }, card)
+        make("UICorner", { CornerRadius = UDim.new(0, 4) }, track)
+        local fill = make("Frame", { Size = UDim2.fromScale(0, 1), BackgroundColor3 = PINK, BorderSizePixel = 0, ZIndex = 7 }, track)
+        make("UICorner", { CornerRadius = UDim.new(0, 4) }, fill)
+        make("UIGradient", { Color = ColorSequence.new(Color3.fromRGB(255, 120, 170), Color3.fromRGB(255, 210, 150)) }, fill)
+        local pctLabel = make("TextLabel", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 270), Size = UDim2.fromOffset(80, 16), BackgroundTransparency = 1,
+            Text = "0%", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = MUTED, ZIndex = 6 }, card)
+
+        local quick = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+        TweenService:Create(card, quick, { GroupTransparency = 0, Position = UDim2.fromScale(0.5, 0.5) }):Play()
+        TweenService:Create(edge, quick, { Position = UDim2.fromScale(0.5, 0.5) }):Play()
+        TweenService:Create(edgeStroke, quick, { Transparency = 0.35 }):Play()
+        TweenService:Create(dim, quick, { BackgroundTransparency = 0.45 }):Play()
+
+        function Loader.step(text, pct)
+            Loader.pct = math.max(Loader.pct, pct or Loader.pct)
+            if not gui.Parent then return end
+            status.Text = text
+            pctLabel.Text = ("%d%%"):format(math.floor(Loader.pct * 100 + 0.5))
+            TweenService:Create(fill, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = UDim2.fromScale(Loader.pct, 1) }):Play()
+        end
+        function Loader.finish()
+            if Loader.done or not gui.Parent then return end
+            Loader.done = true
+            Loader.step("Ready", 1)
+            task.wait(0.4)
+            local out = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+            TweenService:Create(card, out, { GroupTransparency = 1, Position = UDim2.new(0.5, 0, 0.5, -14) }):Play()
+            TweenService:Create(edge, out, { Position = UDim2.new(0.5, 0, 0.5, -14) }):Play()
+            TweenService:Create(edgeStroke, out, { Transparency = 1 }):Play()
+            TweenService:Create(dim, out, { BackgroundTransparency = 1 }):Play()
+            task.delay(0.45, function()
+                pcall(function() scene.stop() end)
+                gui:Destroy()
+            end)
+        end
+        -- never leave the card up if startup breaks somewhere
+        task.delay(60, function() if not Loader.done then pcall(Loader.finish) end end)
+    end)
+    if not ok then
+        Loader.step = function() end
+        Loader.finish = function() end
+    end
+end
+Loader.step("Loading the game's modules", 0.08)
+
+----------------------------------------------------------------------
 -- GAME LIBRARY
 ----------------------------------------------------------------------
 local G = {}
@@ -698,6 +793,7 @@ do
     G.PTUpgrades = (function() local ok, m = pcall(function() return require(Client.PumpkinTycoonCmds.Upgrades) end) return ok and m or nil end)()
 end
 
+Loader.step("Reading your settings", 0.22)
 local function save() return G.Save.Get() end
 -- the game's Directory throws on unknown keys instead of returning nil
 local function dirGet(category, key)
@@ -878,6 +974,7 @@ do
     end
     -- PlayerGui on purpose: under gethui() the thread loses write access to
     -- the UI as soon as it calls back into the game's own modules
+    Loader.step("Building the window", 0.35)
     local parent = LocalPlayer:WaitForChild("PlayerGui")
     pcall(function()
         for _, old in ipairs(gethui():GetChildren()) do if old.Name == "PS99Hub" then old:Destroy() end end
@@ -912,7 +1009,7 @@ do
         return win.Visible and gui.Enabled
     end
     UI.sceneFps = tonumber(Settings.values.sceneFps) or 15
-    local sceneHandle = pdBuildScene(sceneHost, { active = shown, fps = function() return UI.sceneFps end, detail = 0.4, noSway = true })
+    local sceneHandle = buildScene(sceneHost, { active = shown, fps = function() return UI.sceneFps end, detail = 0.4, noSway = true })
     -- a CanvasGroup re-renders its whole picture whenever anything inside
     -- moves; it is only needed to round the corners. Fullscreen has square
     -- corners, so there the scene lives in a plain clipping frame instead.
@@ -1713,6 +1810,7 @@ end
 ----------------------------------------------------------------------
 -- FEATURES
 ----------------------------------------------------------------------
+Loader.step("Starting the features", 0.55)
 local F = {}
 local Tycoon = {}
 env.__PS99HUB_TYCOON = Tycoon
@@ -1744,7 +1842,7 @@ task.spawn(function()
         -- fast lane: tiny, frequent checks (ultimate, tycoon buys, wild throws)
         -- don't wait behind the heavier features
         for _, l in ipairs(loops) do
-            if l.interval <= 0.5 and S.on[l.key] and now >= l.next and not l.running then
+            if l.interval <= 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap") then
                 l.next = now + l.interval
                 l.running = true
                 task.spawn(function()
@@ -1759,7 +1857,7 @@ task.spawn(function()
             for offset = 0, total - 1 do
                 local index = ((loopCursor + offset - 1) % total) + 1
                 local l = loops[index]
-                if l.interval > 0.5 and S.on[l.key] and now >= l.next and not l.running then
+                if l.interval > 0.5 and S.on[l.key] and now >= l.next and not l.running and (not S.turkeyFight or l.key == "turkeyboss" or l.key == "enchantswap") then
                     l.next = now + l.interval
                     l.running = true
                     activeLoopWorkers += 1
@@ -1983,8 +2081,11 @@ do
             G.Variables.OpeningEgg = 1
             S.hatchT0, S.eggsAtStart = os.clock(), S.eggs
             while S.on.hatch and alive() do
-                local egg = nearestEgg()
-                if not egg then
+                local egg = not S.turkeyFight and nearestEgg() or nil
+                if S.turkeyFight then
+                    setStatus("hatch", "Paused - fighting the Turkey")
+                    task.wait(0.5)
+                elseif not egg then
                     S.target = "-"
                     setStatus("hatch", "No egg in range - stand next to one")
                     task.wait(0.25)
@@ -2217,6 +2318,15 @@ do
                 while S.on.tycoonfarm and S.on.farm and alive() and Tycoon.plot() do
                     setStatus("farm", "Paused - Tycoon Zone Farm is running")
                     task.wait(1)
+                end
+                if (S.resetFarmPets or 0) > (F.farmResetAt or 0) then
+                    table.clear(assigned)
+                    F.farmResetAt = os.clock()
+                end
+                if S.eventFocus or S.turkeyFight then
+                    setStatus("farm", "Paused while breaking " .. (S.eventFocus or "the Turkey"))
+                    task.wait(0.3)
+                    continue
                 end
                 local root = hrp()
                 -- the whole area: the quest's area if one is locked, otherwise
@@ -2623,6 +2733,16 @@ do
                     setStatus("tycoonfarm", "Only works inside the Pumpkin Tycoon")
                     task.wait(1)
                 else
+                    if (S.resetFarmPets or 0) > (Tycoon.farmResetAt or 0) then
+                        table.clear(assigned)
+                        Tycoon.farmResetAt = os.clock()
+                    end
+                    if S.eventFocus or S.turkeyFight then
+                        -- an event fight (turkey, orchard chest) has the pets
+                        setStatus("tycoonfarm", "Paused while breaking " .. (S.eventFocus or "the Turkey"))
+                        task.wait(0.3)
+                        continue
+                    end
                     if not prefix or Tycoon.retarget then
                         Tycoon.retarget = false
                         local idx
@@ -2711,7 +2831,7 @@ loop("equipbest", 8, function()
 
     if G.PetCmds and pcall(G.PetCmds.EquipBest) then setStatus("equipbest", "Equipped your best pets  ·  " .. os.date("%H:%M")) end
 end)
--- ANTI AFK (same as the Pet Dimensions hub): a real Space key press through
+-- ANTI AFK: a real Space key press through
 -- VirtualInputManager every N minutes, which resets both Roblox's 20 minute
 -- kick and the game's own idle detection. Idled is kept as a backup.
 do
@@ -3432,8 +3552,8 @@ do
         if okH and lifetime then fields[#fields + 1] = { name = "Eggs hatched", value = commas(lifetime), inline = true } end
         fields[#fields + 1] = { name = "Huges this session", value = tostring(Tracker.huges), inline = true }
         local embed = {
-            title = info.tag .. " HATCHED!",
-            description = ("**%s** just got **%s**"):format(LocalPlayer.Name, info.name),
+            title = info.title or (info.tag .. " HATCHED!"),
+            description = info.desc or ("**%s** just got **%s**"):format(LocalPlayer.Name, info.name),
             color = colour,
             fields = fields,
             footer = { text = "PS99 Hub" },
@@ -3615,6 +3735,41 @@ local function itemCount(id)
     end
     return n
 end
+-- WILD HUGE ALERTS: a toast (and a Discord ping if the webhook is on) the
+-- moment a huge or rarer wild pet spawns on your island, caught or not
+do
+    local announced = {}
+    loop("wildalerts", 3, function()
+        local plot, _, m = Tycoon.plot()
+        if not plot then return setStatus("wildalerts", "Only works inside the Pumpkin Tycoon") end
+        local saved = {}
+        pcall(function() saved = plot:Save(m.Types.VAR.Wild) or {} end)
+        local live, seenNow = 0, {}
+        for slot, w in pairs(saved) do
+            if type(w) == "table" and w.P then
+                local d = Chances.petInfo(w.P)
+                local tag = d and (d.gargantuan and "GARGANTUAN" or (d.titanic and "TITANIC" or (d.huge and "HUGE"))) or nil
+                if tag then
+                    live += 1
+                    local key = tostring(slot) .. ":" .. tostring(w.P) .. ":" .. tostring(w.S or "")
+                    seenNow[key] = true
+                    if not announced[key] then
+                        announced[key] = true
+                        local chance = tonumber(w.C) and (" at %d%%"):format(w.C * 100) or ""
+                        UI.toast("WILD " .. tag, ("%s spawned on your island%s"):format(tostring(w.P), chance), THEME.gold)
+                        if S.on.webhook then
+                            task.spawn(Webhook.send, { tag = tag, name = tostring(w.P), title = "WILD " .. tag .. " SPAWNED!",
+                                desc = ("A wild **%s** just spawned on **%s**'s island%s"):format(tostring(w.P), LocalPlayer.Name, chance) })
+                        end
+                    end
+                end
+            end
+        end
+        for key in pairs(announced) do if not seenNow[key] then announced[key] = nil end end
+        setStatus("wildalerts", live > 0 and ("%d huge-or-better wild pet%s on your island right now"):format(live, live == 1 and "" or "s")
+            or "Watching your island's wild spawns")
+    end)
+end
 local WildStats = { caught = 0, missed = 0, huges = 0, throws = 0, byPet = {}, lastThrow = 0 }
 env.__PS99HUB_WILD = WildStats
 do
@@ -3638,10 +3793,46 @@ do
     -- not repeatedly targeted on later scans. A new spawn gets a new object.
     local attemptedPets = {}
 
-    -- Huges always take priority. For other pets, sort by raw spawn chance
-    -- (lowest first), not net-adjusted chance. Net multipliers must not make
-    -- rare targets look common.
-    local function candidates(Wild, plot, nets, ultras, attempted)
+    -- How rare a wild pet is: gargantuan > titanic > huge first, then its
+    -- tier in the event roster (Rung: Gourd Toad 1 ... Maple Angelus 11),
+    -- then the zone it spawned in (higher area = higher egg), then rainbow /
+    -- golden / shiny. Catch % plays no part.
+    local rungOf
+    local function rung(petId, m)
+        if not rungOf then
+            rungOf = {}
+            pcall(function()
+                for _, r in ipairs(m.Types.ROSTER or {}) do
+                    if type(r) == "table" and r.Pet then rungOf[r.Pet] = tonumber(r.Rung) or 0 end
+                end
+            end)
+        end
+        local base = tostring(petId or ""):gsub("^Huge ", ""):gsub("^Titanic ", ""):gsub("^Gargantuan ", "")
+        return rungOf[petId] or rungOf[base] or 0
+    end
+    local function bigTier(petId)
+        local id = tostring(petId or "")
+        local d = Chances.petInfo(id)
+        if id:find("^Gargantuan ") or (d and d.gargantuan) then return 3 end
+        if id:find("^Titanic ") or (d and d.titanic) then return 2 end
+        if id:find("^Huge ") or (d and d.huge) then return 1 end
+        return 0
+    end
+    local function rank(entry, zone, m)
+        local variant = (entry.R and 3 or (entry.G and 2 or 0)) + (entry.S and 1 or 0)
+        return bigTier(entry.P), rung(entry.P, m), tonumber(zone) or 0, variant
+    end
+    local function better(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        if a.rung ~= b.rung then return a.rung > b.rung end
+        if a.zone ~= b.zone then return a.zone > b.zone end
+        if a.variantScore ~= b.variantScore then return a.variantScore > b.variantScore end
+        if a.new ~= b.new then return a.new end
+        return tostring(a.pet) < tostring(b.pet)
+    end
+    WildStats.rank, WildStats.better = rank, better
+
+    local function candidates(Wild, plot, m, nets, ultras, attempted, zoneOf)
         local caughtIds = {}
         pcall(function() caughtIds = plot:Save("CaughtIds") or {} end)
         local all = Wild.All() or {}
@@ -3656,42 +3847,29 @@ do
         for slot, phys in pairs(all) do
             if type(phys) == "table" and phys.At and not attempted[phys] and not phys.Catching and not phys.AttemptingCatch and not phys.SoldOut then
                 local entry = type(phys.Entry) == "table" and phys.Entry or {}
-                local huge = hugeTier(entry.P)
+                local tier, petRung, zone, variantScore = rank(entry, zoneOf[tostring(slot)], m)
                 local net
-                if huge and ultras > 0 and S.on.wildultrahuge ~= false then net = "Ultra Pet Net"
+                if tier > 0 and ultras > 0 and S.on.wildultrahuge ~= false then net = "Ultra Pet Net"
                 elseif nets > 0 then net = "Pet Net" end
-                local maxChance = (tonumber(Settings.values.wildMax) or 30) / 100
-                local baseChance0 = tonumber(phys.CatchChance) or 1
-                -- only the rare ones: skip anything easier than your limit (huges always count)
-                if net and not huge and baseChance0 > maxChance then net = nil end
                 if net then
-                    local baseChance = tonumber(phys.CatchChance) or 0
-                    local displayChance = math.min(1, baseChance * netMult(net))
-                    local new = S.on.wildnew ~= false and not caughtIds[entry.P]
-                    local variantScore = (entry.S and 30 or 0) + (entry.R and 20 or 0) + (entry.G and 10 or 0)
                     list[#list + 1] = {
                         slot = slot, phys = phys, net = net, pet = entry.P or "?",
-                        rawChance = baseChance, chance = displayChance, huge = huge,
+                        chance = math.min(1, (tonumber(phys.CatchChance) or 0) * netMult(net)),
+                        huge = tier > 0, tier = tier, rung = petRung, zone = zone, variantScore = variantScore,
                         variant = (entry.S and "Shiny " or "") .. (entry.R and "Rainbow " or (entry.G and "Golden " or "")),
-                        variantScore = variantScore, new = new,
+                        new = S.on.wildnew ~= false and not caughtIds[entry.P],
                     }
                 end
             end
         end
-        table.sort(list, function(a, b)
-            if a.huge ~= b.huge then return a.huge end
-            if a.rawChance ~= b.rawChance then return a.rawChance < b.rawChance end
-            if a.variantScore ~= b.variantScore then return a.variantScore > b.variantScore end
-            if a.new ~= b.new then return a.new end
-            return tostring(a.pet) < tostring(b.pet)
-        end)
+        table.sort(list, better)
         return list
     end
 
     local function throwAt(plot, m, root, c)
         local function try(offset)
             root.CFrame = CFrame.new(c.phys.At + offset)
-            task.wait(0.55)
+            task.wait(0.25)
             return { pcall(function() return plot:Invoke(m.Types.NET.CatchWild, c.slot, c.net) end) }
         end
         local r = try(Vector3.new(3, 3, 0))
@@ -3715,21 +3893,27 @@ do
             return setStatus("wildcatch", "Out of Pet Nets  ·  turn on Auto Buy Nets")
         end
         -- every spawn on your island, straight from its save (loaded or not)
-        local maxChance = (tonumber(Settings.values.wildMax) or 30) / 100
         local saved = {}
         pcall(function() saved = plot:Save(m.Types.VAR.Wild) or {} end)
-        local loaded = {}
+        local loaded, zoneOf = {}, {}
         for slot in pairs(Wild.All() or {}) do loaded[tostring(slot)] = true end
-        local rarest, scoutZone
+        local rarest, scoutBest, scoutZone
         for slot, w in pairs(saved) do
-            if type(w) == "table" and tonumber(w.C) then
-                if not rarest or w.C < rarest.C then rarest = w end
-                local huge = hugeTier(w.P)
-                if (huge or w.C <= maxChance) and not loaded[tostring(slot)] then scoutZone = scoutZone or w.Z end
+            if type(w) == "table" and w.P then
+                zoneOf[tostring(slot)] = w.Z
+                local tier, petRung, zone, variant = rank(w, w.Z, m)
+                local info = { tier = tier, rung = petRung, zone = zone, variantScore = variant, new = false, pet = w.P }
+                if not rarest or better(info, rarest) then rarest = info end
+                -- the rarest spawn that hasn't streamed in yet gets scouted
+                if not loaded[tostring(slot)] and (not scoutBest or better(info, scoutBest)) then
+                    scoutBest, scoutZone = info, w.Z
+                end
             end
         end
-        -- a rare spawn that isn't streamed in yet: hop to its wild area so it loads
-        if scoutZone and os.clock() - (WildStats.lastScout or 0) > 20 then
+        local loadedBest = candidates(Wild, plot, m, nets, ultras, attemptedPets, zoneOf)[1]
+        if scoutBest and loadedBest and not better(scoutBest, loadedBest) then scoutZone = nil end
+        -- a rarer spawn that isn't streamed in yet: hop to its wild area so it loads
+        if scoutZone and os.clock() - (WildStats.lastScout or 0) > 8 then
             WildStats.lastScout = os.clock()
             local _, myModel = Tycoon.plot()
             local area = myModel and myModel:FindFirstChild("WildAreas") and myModel.WildAreas:FindFirstChild("WildArea_" .. tostring(scoutZone))
@@ -3740,54 +3924,44 @@ do
                 end)
             end
         end
-        local list = candidates(Wild, plot, nets, ultras, attemptedPets)
-        if #list == 0 and nets == 0 then
-            return setStatus("wildcatch", ("Out of Pet Nets (%d Ultra kept for huges)%s  ·  turn on Auto Buy Nets"):format(ultras,
-                rarest and ("  ·  rarest waiting: %s %d%%"):format(tostring(rarest.P), rarest.C * 100) or ""))
-        end
+        local list = candidates(Wild, plot, m, nets, ultras, attemptedPets, zoneOf)
+        local function describe(c) return ("%s%s (tier %s, zone %s)"):format(c.variant or "", tostring(c.pet), tostring(c.rung), tostring(c.zone)) end
         if #list == 0 then
-            return setStatus("wildcatch", ("Nothing at %d%% or rarer right now%s  ·  %d nets  ·  caught %d"):format(maxChance * 100,
-                rarest and ("  ·  rarest is %s at %d%%"):format(tostring(rarest.P), rarest.C * 100) or "", nets, WildStats.caught))
+            return setStatus("wildcatch", ("Every spawned pet has had its throw  ·  %d nets  ·  caught %d%s"):format(nets, WildStats.caught,
+                rarest and ("  ·  rarest out: %s"):format(tostring(rarest.pet)) or ""))
         end
         local lastText
         withTeleport(function(root)
-            local here = list[1].phys.At
             local thrown = 0
-            local i = 1
-            while i <= #list and thrown < 5 and S.on.wildcatch and alive() do
-                local c = list[i]
-                -- chain only to pets close to where we already are
-                if thrown > 0 and (c.phys.At - here).Magnitude > 60 then i += 1 continue end
-                if thrown > 0 then
-                    local wait = cooldown - (os.clock() - WildStats.lastThrow)
-                    if wait > 0 then task.wait(wait) end
-                end
-                if c.phys.Catching or c.phys.SoldOut then i += 1 continue end
-                -- One attempt per individual spawned pet, including Huges.
-                attemptedPets[c.phys] = true
-                local caught, err = throwAt(plot, m, root, c)
-                thrown += 1
-                here = c.phys.At
-                WildStats.throws += 1
-                if caught == nil then
-                    lastText = ("%s: %s"):format(c.pet, err)
-                    i += 1
-                elseif caught then
-                    WildStats.caught += 1
-                    WildStats.byPet[c.pet] = (WildStats.byPet[c.pet] or 0) + 1
-                    if c.huge then
-                        WildStats.huges += 1
-                        UI.toast("HUGE CAUGHT!", c.variant .. c.pet, THEME.gold)
-                    else
-                        UI.toast("WILD PET CAUGHT", ("%s%s  ·  %d%%"):format(c.variant, c.pet, c.chance * 100), THEME.good)
+            -- rarest first, one throw each, straight through the list
+            for _, c in ipairs(list) do
+                if thrown >= 12 or not (S.on.wildcatch and alive()) then break end
+                if not (c.phys.Catching or c.phys.SoldOut or attemptedPets[c.phys]) then
+                    if thrown > 0 then
+                        local wait = cooldown - (os.clock() - WildStats.lastThrow)
+                        if wait > 0 then task.wait(wait) end
                     end
-                    lastText = ("Caught %s%s (%d%%)"):format(c.variant, c.pet, c.chance * 100)
-                    i += 1
-                else
-                    WildStats.missed += 1
-                    lastText = ("Missed %s%s (%d%%)"):format(c.variant, c.pet, c.chance * 100)
-                    -- This spawn has now had its single attempt. A later
-                    -- newly spawned Huge will still be prioritised normally.
+                    -- exactly one attempt per spawned pet, huges included
+                    attemptedPets[c.phys] = true
+                    local caught, err = throwAt(plot, m, root, c)
+                    thrown += 1
+                    WildStats.throws += 1
+                    if caught == nil then
+                        lastText = ("%s: %s"):format(describe(c), err)
+                    elseif caught then
+                        WildStats.caught += 1
+                        WildStats.byPet[c.pet] = (WildStats.byPet[c.pet] or 0) + 1
+                        if c.huge then
+                            WildStats.huges += 1
+                            UI.toast("HUGE CAUGHT!", c.variant .. c.pet, THEME.gold)
+                        else
+                            UI.toast("WILD PET CAUGHT", describe(c), THEME.good)
+                        end
+                        lastText = "Caught " .. describe(c)
+                    else
+                        WildStats.missed += 1
+                        lastText = "Missed " .. describe(c)
+                    end
                 end
             end
         end)
@@ -4232,6 +4406,266 @@ loop("turkeysighting", 2, function()
     else
         setStatus("turkeysighting", ("%s: %s"):format(petId, tostring(why)))
     end
+end)
+
+-- EVENT FOCUS: TURKEY BOSS + ORCHARD CHESTS -----------------------------------
+-- When the turkey is up (and the island's cannon is built) the cannon flies
+-- you to its arena, every pet goes on it until it's down, then you go back to
+-- your farm spot. Orchard chests and hay piles on your island get the same
+-- treatment. While this runs the zone farm and the event egg hatcher pause.
+local EventFocus = {}
+function EventFocus.find(match, myModel)
+    local suffix = myModel and ("_" .. myModel.Name)
+    local origin = myModel and myModel:GetPivot().Position
+    for _, b in ipairs(G.THINGS.Breakables:GetChildren()) do
+        local id = b:GetAttribute("BreakableID")
+        if type(id) == "string" and match(id) and b:IsA("Model") then
+            if not myModel then return b end
+            local area = tostring(b:GetAttribute("AreaID") or "")
+            local ok, pos = pcall(function() return b:GetPivot().Position end)
+            if area:sub(-#suffix) == suffix or (ok and (pos - origin).Magnitude < 350) then return b end
+        end
+    end
+    return nil
+end
+function EventFocus.fight(target, label, stand, key)
+    local assigned = {}
+    S.eventFocus = label
+    local t0 = os.clock()
+    -- tap it as fast as the game allows: 8 taps a second, more with the
+    -- Swift Taps enchant (the game's own cap is 16)
+    local rate = 8
+    pcall(function()
+        local swift = require(RS.Library.Client.EnchantCmds).GetPower("Swift Taps")
+        if type(swift) == "number" and swift > 0 then rate = math.min(8 * (1 + swift / 100), 16) end
+    end)
+    local tapping = true
+    task.spawn(function()
+        local gap = 1 / rate
+        local nextTap = os.clock()
+        while tapping and target.Parent and alive() do
+            pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", target.Name)
+            S.counts.taps = (S.counts.taps or 0) + 1
+            nextTap += gap
+            local wait = nextTap - os.clock()
+            if wait > 0 then task.wait(wait) else nextTap = os.clock() task.wait() end
+        end
+    end)
+    while target.Parent and S.on[key] and alive() and os.clock() - t0 < 900
+        and not (S.turkeyFight and key ~= "turkeyboss") do
+        local root = hrp()
+        if root and (root.Position - stand.Position).Magnitude > 25 then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = stand
+        end
+        F.drivePets(assigned, { target })
+        task.wait(0.15)
+    end
+    tapping = false
+    S.eventFocus = nil
+end
+function EventFocus.goBack(back)
+    local root = hrp()
+    if back and root then
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = back
+    end
+    -- the farms remember which pet was on which block: start them fresh
+    S.resetFarmPets = os.clock()
+    Tycoon.retarget = true
+end
+-- run a fight on its own thread so it never holds a scheduler slot
+function EventFocus.start(target, label, stand, key, after)
+    S.eventFocus = label
+    task.spawn(function()
+        local ok, err = pcall(EventFocus.fight, target, label, stand, key)
+        S.eventFocus = nil
+        if not ok then setStatus(key, "Fight stopped: " .. tostring(err):sub(1, 60)) end
+        pcall(after)
+    end)
+end
+-- ENCHANT LOADOUTS ------------------------------------------------------------
+-- Turkey fight: 3 Strong Pets + 2 Tap Power. Farming: Lucky Eggs in every
+-- slot. Always your highest tier (falls back a tier when you run out), and
+-- it swaps the moment the turkey spawns or despawns.
+local Enchants = { lastApply = 0 }
+env.__PS99HUB_ENCHANTS = Enchants
+function Enchants.loadout(fighting, slots)
+    local want = fighting and { { "Strong Pets", 3 }, { "Tap Power", 2 } } or { { "Lucky Eggs", slots } }
+    local bag = ((save() or {}).Inventory or {}).Enchant or {}
+    local list, used = {}, 0
+    for _, w in ipairs(want) do
+        local stacks = {}
+        for uid, it in pairs(bag) do
+            if type(it) == "table" and it.id == w[1] then stacks[#stacks + 1] = { uid = uid, tier = tonumber(it.tn) or 1, amount = tonumber(it._am) or 1 } end
+        end
+        table.sort(stacks, function(a, b) return a.tier > b.tier end)
+        local need = math.min(w[2], slots - used)
+        for _, st in ipairs(stacks) do
+            while need > 0 and st.amount > 0 do
+                list[#list + 1] = { uid = st.uid, name = ("%s %s"):format(w[1], st.tier) }
+                st.amount -= 1
+                need -= 1
+                used += 1
+            end
+            if need == 0 then break end
+        end
+    end
+    return list
+end
+function Enchants.apply(fighting)
+    -- one swap at a time: two at once would fight over the same slots
+    if Enchants.busy then return false, "already swapping" end
+    Enchants.busy = true
+    local results = table.pack(pcall(Enchants.applyNow, fighting))
+    Enchants.busy = false
+    if not results[1] then return false, tostring(results[2]) end
+    return table.unpack(results, 2, results.n)
+end
+function Enchants.applyNow(fighting)
+    local EC = require(RS.Library.Client.EnchantCmds)
+    local okM, slots = pcall(EC.GetMaxEquippedEnchants)
+    slots = okM and tonumber(slots) or 5
+    local target = Enchants.loadout(fighting, slots)
+    if #target == 0 then return false, "no enchants for this loadout in your bag" end
+    -- already wearing exactly this set? leave it alone
+    local have, wantCount = {}, {}
+    for _, uid in pairs(EC.GetEquipped() or {}) do have[uid] = (have[uid] or 0) + 1 end
+    for _, t in ipairs(target) do wantCount[t.uid] = (wantCount[t.uid] or 0) + 1 end
+    local same = true
+    for uid, n in pairs(wantCount) do if have[uid] ~= n then same = false end end
+    for uid, n in pairs(have) do if wantCount[uid] ~= n then same = false end end
+    local names = {}
+    for _, t in ipairs(target) do names[#names + 1] = t.name end
+    if same then return true, table.concat(names, ", "), false end
+    local function count()
+        local n = 0
+        for _ in pairs(EC.GetEquipped() or {}) do n += 1 end
+        return n
+    end
+    -- the server drops requests sent too close together: clear slot by
+    -- slot and make sure they're really empty before equipping
+    -- slots shift after a clear, so always clear the highest slot that is
+    -- really filled right now and wait for it to go before the next one
+    for _ = 1, slots * 3 do
+        local before = count()
+        if before == 0 then break end
+        local top
+        for k in pairs(EC.GetEquipped() or {}) do
+            local n = tonumber(k)
+            if n and (not top or n > top) then top = n end
+        end
+        if not top then break end
+        pcall(EC.Unequip, top)
+        local t0 = os.clock()
+        while count() >= before and os.clock() - t0 < 1.5 do task.wait(0.1) end
+    end
+    -- then one at a time, waiting for each to land
+    for _, t in ipairs(target) do
+        for _ = 1, 3 do
+            local before = count()
+            pcall(EC.Equip, t.uid)
+            local t0 = os.clock()
+            while count() <= before and os.clock() - t0 < 1.5 do task.wait(0.1) end
+            if count() > before then break end
+        end
+    end
+    Enchants.lastApply = os.clock()
+    return true, table.concat(names, ", "), true
+end
+loop("enchantswap", 1, function()
+    if os.clock() - Enchants.lastApply < 3 then return end
+    local fighting = S.turkeyFight == true
+    local ok, a, b, changed = pcall(Enchants.apply, fighting)
+    if not ok then return setStatus("enchantswap", "Swap failed: " .. tostring(a):sub(1, 60)) end
+    if not a then
+        if b == "already swapping" then return end
+        return setStatus("enchantswap", tostring(b))
+    end
+    if changed then UI.toast("ENCHANTS", (fighting and "Turkey set: " or "Farm set: ") .. tostring(b), THEME.accent) end
+    setStatus("enchantswap", (fighting and "Turkey fight set  ·  " or "Farming set  ·  ") .. tostring(b))
+end)
+loop("turkeyboss", 1, function()
+    local plot, myModel, m = Tycoon.plot()
+    if not plot then return setStatus("turkeyboss", "Only works inside the Pumpkin Tycoon") end
+    local t = EventFocus.find(function(id) return id:find("The Turkey", 1, true) ~= nil end, nil)
+    if not t then
+        if S.turkeyFight and S.eventFocus ~= "the Turkey" then S.turkeyFight = false end
+        local okT, TU = pcall(function() return require(RS.Library.Util.PumpkinTycoonTurkey) end)
+        local left
+        if okT then
+            pcall(function()
+                local per, now = TU.Period(), workspace:GetServerTimeNow()
+                left = (TU.Window(now, per) + 1) * per - now
+            end)
+        end
+        return setStatus("turkeyboss", left and ("Next turkey in %d:%02d"):format(left // 60, math.floor(left % 60)) or "Waiting for the turkey")
+    end
+    -- the cannon already refused for this turkey: don't hold everything up
+    if EventFocus.failedTurkey == t.Name then
+        S.turkeyFight = false
+        return
+    end
+    -- turkey is up: everything else stops until it's gone
+    local starting = not S.turkeyFight
+    S.turkeyFight = true
+    if starting and S.on.enchantswap and Enchants then pcall(Enchants.apply, true) end
+    if S.eventFocus then return end
+    local pos = t:GetPivot().Position
+    local root = hrp()
+    if not root then return end
+    local back = Tycoon.spot or root.CFrame
+    if (root.Position - pos).Magnitude > 250 then
+        -- your island's cannon (target "centre") flies you to the arena
+        local pad
+        for _, d in ipairs(myModel:GetDescendants()) do
+            if d.Name == "CannonPad" and d:IsA("BasePart") and d:GetAttribute("Target") == "centre" then pad = d break end
+        end
+        if pad then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
+            task.wait(0.6)
+        end
+        local ok, a, b = pcall(function() return plot:Invoke(m.Types.NET.Cannon, "centre") end)
+        local t1 = os.clock()
+        while os.clock() - t1 < 10 and hrp() and (hrp().Position - pos).Magnitude > 250 do task.wait(0.3) end
+        if not hrp() or (hrp().Position - pos).Magnitude > 250 then
+            local why = (ok and type(b) == "string" and b) or (not ok and tostring(a)) or nil
+            S.turkeyFight = false
+            EventFocus.failedTurkey = t.Name
+            EventFocus.goBack(back)
+            return setStatus("turkeyboss", "Cannon didn't launch: " .. tostring(why or "build the island's cannon (Zone8_Cannon button) first"))
+        end
+    end
+    setStatus("turkeyboss", "Fighting the Turkey with every pet")
+    UI.toast("TURKEY", "Flying to the turkey fight", THEME.gold)
+    EventFocus.start(t, "the Turkey", CFrame.new(pos + Vector3.new(0, 5, 24), pos), "turkeyboss", function()
+        S.turkeyFight = false
+        if S.on.enchantswap and Enchants then pcall(Enchants.apply, false) end
+        EventFocus.goBack(back)
+        S.counts.turkeys = (S.counts.turkeys or 0) + 1
+        setStatus("turkeyboss", ("Turkey fight done  ·  %d this session  ·  back to farming"):format(S.counts.turkeys))
+    end)
+end)
+loop("orchardchests", 2, function()
+    local plot, myModel = Tycoon.plot()
+    if not plot then return setStatus("orchardchests", "Only works inside the Pumpkin Tycoon") end
+    if S.eventFocus then return end
+    local c = EventFocus.find(function(id) return id:find("Orchard Chest", 1, true) ~= nil or id:find("Hay Pile", 1, true) ~= nil end, myModel)
+    if not c then
+        return setStatus("orchardchests", ("Watching your island  ·  %d broken this session"):format(S.counts.orchard or 0))
+    end
+    local root = hrp()
+    if not root then return end
+    local back = Tycoon.spot or root.CFrame
+    local name = tostring(c:GetAttribute("BreakableID")):gsub(" %(Pumpkin Tycoon%)", "")
+    local pos = c:GetPivot().Position
+    setStatus("orchardchests", "Breaking a " .. name)
+    EventFocus.start(c, "a " .. name, CFrame.new(pos + Vector3.new(0, 5, 14), pos), "orchardchests", function()
+        EventFocus.goBack(back)
+        S.counts.orchard = (S.counts.orchard or 0) + 1
+        UI.toast("ORCHARD", name .. " broken", THEME.good)
+    end)
 end)
 -- AUTO RANK QUESTS -----------------------------------------------------------
 -- Reads the four rank quests from your save, decides how to finish each one
@@ -4859,7 +5293,10 @@ do
         task.spawn(function()
             local hatched = 0
             while S.on.lasthatch and alive() do
-                if S.on.hatch then
+                if S.eventFocus or S.turkeyFight then
+                    setStatus("lasthatch", "Paused while breaking " .. (S.eventFocus or "the Turkey"))
+                    task.wait(0.5)
+                elseif S.on.hatch then
                     S.lastHatching = false
                     setStatus("lasthatch", "Auto Hatch is on and already hatching - this waits")
                     task.wait(1)
@@ -5160,20 +5597,16 @@ end)
 ----------------------------------------------------------------------
 -- BUILD THE PAGES
 ----------------------------------------------------------------------
+Loader.step("Building the tabs", 0.75)
 do
     local pinnedTab = UI.tab("Pinned", 0)
     UI.pinnedTab = pinnedTab
     local farm = UI.tab("Farm", 1)
     local hatchTab = UI.tab("Hatch", 2)
     local eventTab = UI.tab("Event", 3)
-    local catchTab = UI.tab("Catching", 4)
     local s = UI.section(hatchTab, "Hatching", THEME.gold)
     UI.toggle(s, "hatch", "Auto Hatch", "Hatches the nearest egg at max amount, no animation", false, function(on) if on then F.startHatch() end end)
     UI.status(s, "hatch", "Off")
-    UI.toggle(s, "lasthatch", "Hatch Last Area Egg Only", "Event island: waits for your last area, then hatches only that egg (separate from Auto Hatch)", false, function(on)
-        if on then F.startLastHatch() end
-    end)
-    UI.status(s, "lasthatch", "Off")
     s = UI.section(farm, "Farming", THEME.good)
     UI.toggle(s, "fastpets", "Fast Pets", "Pets move x200 faster everywhere - main world, event, any area", true)
     UI.toggle(s, "autopickup", "Auto Pickup Everything", "Coins, diamonds, lootbags and all drops, from far away", true)
@@ -5188,8 +5621,62 @@ do
     UI.status(s, "areafarm", "Off")
     UI.toggle(s, "ultimate", "Auto Ultimate", "Fires your equipped ultimate whenever it is charged in a zone", false)
     UI.status(s, "ultimate", "Off")
-    UI.toggle(s, "equipbest", "Auto Equip Best", "Re-equips your strongest pets every 30 seconds", false)
-    UI.status(s, "equipbest", "Off")
+    -- live overview of everything the event runs on
+    s = UI.section(eventTab, "Event overview", THEME.gold)
+    do
+        s.n += 1
+        local panel = UI.new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.55, ZIndex = 4 }, s.frame)
+        UI.corner(panel, 10)
+        UI.glassAdd(panel)
+        UI.pad(panel, 16, 12, 8, 8)
+        UI.new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, panel)
+        local ROWS = { "coins", "tokens", "season", "nets", "turkey", "island" }
+        local lines = {}
+        for i, key in ipairs(ROWS) do
+            local l = UI.label(panel, { text = "", size = 12, sz = UDim2.new(1, 0, 0, 16), z = 5, rich = true })
+            l.LayoutOrder = i
+            lines[key] = l
+        end
+        local function row(key, name, value, hot)
+            lines[key].Text = ('<font color="#cea0b6">%s:</font>  <font color="%s">%s</font>'):format(name, hot and "#ffd33d" or "#ffeef4", value)
+        end
+        task.spawn(function()
+            while alive() do
+                if eventTab.page.Visible and UI.win.Visible then
+                    pcall(function()
+                        local plot, _, m = Tycoon.plot()
+                        if not plot then
+                            row("coins", "Pumpkin Tycoon", "join the event to see your numbers")
+                            for _, k in ipairs(ROWS) do if k ~= "coins" then lines[k].Text = "" end end
+                            return
+                        end
+                        row("coins", "Patch Coins", short(Tycoon.coins(m) or 0))
+                        local okT, tokens = pcall(m.UpgradesClient.Tokens)
+                        row("tokens", "Pumpkin Tokens", commas(okT and tonumber(tokens) or 0))
+                        local p = Pass.plan and Pass.plan()
+                        row("season", "Season Tokens", p and ("%d  ·  %s"):format(p.stars, p.huge and not p.huge.open and "huge tier still locked" or (p.huge and "saving for the huge" or "huge bought")) or "-", p and p.huge ~= nil)
+                        row("nets", "Nets", ("%d Pet Nets  ·  %d Ultra Pet Nets"):format(itemCount("Pet Net"), itemCount("Ultra Pet Net")))
+                        local turkeyUp = EventFocus.find(function(id) return id:find("The Turkey", 1, true) ~= nil end, nil)
+                        local left
+                        pcall(function()
+                            local TU = require(RS.Library.Util.PumpkinTycoonTurkey)
+                            local per, now = TU.Period(), workspace:GetServerTimeNow()
+                            left = (TU.Window(now, per) + 1) * per - now
+                        end)
+                        row("turkey", "Turkey", turkeyUp and "UP NOW" or (left and ("next in %d:%02d"):format(left // 60, math.floor(left % 60)) or "-"), turkeyUp ~= nil)
+                        local info = TycoonRebirth.info()
+                        local nextBuy = tostring(S.status.tycoon or ""):match("^Next: (.+)$")
+                        local built = tostring(S.status.tycoonrebirth or ""):match("Island [%d%.]+%% built")
+                        row("island", "Island", ("rebirth %s%s%s"):format(info and tostring(info.rebirths) or "?",
+                            info and info.maxed and " (huge/titanic maxed)" or "",
+                            built and ("  ·  " .. built) or (nextBuy and ("  ·  next: " .. nextBuy) or "")))
+                    end)
+                end
+                task.wait(2)
+            end
+        end)
+    end
     s = UI.section(eventTab, "Pumpkin Tycoon", Color3.fromRGB(255, 150, 70))
     UI.toggle(s, "tycoon", "Auto Buy Tycoon", "Buys the cheapest affordable button first, all the way through", false, function(on)
         if on and Tycoon.plot() and UI.handles.tycoonfarm then UI.handles.tycoonfarm.set(true, true) end
@@ -5242,24 +5729,27 @@ do
         end)
     end
 
-    s = UI.section(eventTab, "Event boosts & loot", THEME.good)
-    UI.toggle(s, "cocoa", "Auto Hot Cocoa", "Keeps the coins, damage and luck cocoa boosts topped up", false)
-    UI.status(s, "cocoa", "Off")
-    UI.slider(s, "cocoaMinutes", "Cocoa minutes per top-up", 10, 120, 30, 10)
-    UI.toggle(s, "eventboosts", "Auto Event Boosts", "Starts a Patch Coin / Damage / Island Luck boost from your bag when one runs out, best tier first", false)
-    UI.status(s, "eventboosts", "Off")
-    UI.toggle(s, "eventlootbox", "Auto Open Flannel Gifts", "The event's own lootbox (Patch Coins and boosts) - separate from Auto Open Lootboxes", false)
-    UI.status(s, "eventlootbox", "Off")
-    s = UI.section(eventTab, "Season pass", THEME.gold)
-    UI.toggle(s, "eventpass", "Auto Season Pass", "Spends Season Tokens: opens the huge's tier, saves for the huge, then buys the rest", false)
-    UI.status(s, "eventpass", "Off")
-    s = UI.section(catchTab, "Turkey sightings", Color3.fromRGB(230, 120, 70))
+    s = UI.section(eventTab, "Boss & chests", Color3.fromRGB(230, 120, 70))
+    UI.toggle(s, "turkeyboss", "Auto Turkey Boss", "While the turkey is up only the turkey is fought (everything else waits), then all of it resumes", false, function(on)
+        if not on then S.turkeyFight = false end
+    end)
+    UI.status(s, "turkeyboss", "Off")
+    UI.toggle(s, "enchantswap", "Auto Enchant Swap", "Turkey up: 3 Strong Pets + 2 Tap Power. Farming: all Lucky Eggs. Highest tiers, swaps automatically", true)
+    UI.status(s, "enchantswap", "Off")
+    UI.toggle(s, "orchardchests", "Auto Orchard Chests & Hay Piles", "Breaks them with every pet the moment one spawns on your island, then back to farming", false)
+    UI.status(s, "orchardchests", "Off")
+    s = UI.section(eventTab, "Event egg", THEME.gold)
+    UI.toggle(s, "lasthatch", "Hatch Last Area Egg Only", "Waits for your island's last area, then hatches only that egg (separate from Auto Hatch)", false, function(on)
+        if on then F.startLastHatch() end
+    end)
+    UI.status(s, "lasthatch", "Off")
+    s = UI.section(eventTab, "Wild pets & sightings", Color3.fromRGB(255, 170, 90))
     UI.toggle(s, "turkeysighting", "Auto Catch Turkey Sightings", "Throws a net at the rare huge+ sighting on your island (Ultra first)", false)
     UI.status(s, "turkeysighting", "Off")
-    s = UI.section(catchTab, "Tycoon wild pets", Color3.fromRGB(255, 170, 90))
-    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Scans every spawn; huges first, then only the rarest pets under your limit", false)
+    UI.toggle(s, "wildalerts", "Wild Huge Alerts", "Toast (and a Discord ping if the webhook is on) when a huge+ wild pet spawns on your island", true)
+    UI.status(s, "wildalerts", "Off")
+    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Huges first, then the highest-tier pet from the highest area - one throw per pet", false)
     UI.status(s, "wildcatch", "Off")
-    UI.slider(s, "wildMax", "Only pets with catch chance at or below (%)", 5, 100, 30, 5)
     UI.toggle(s, "wildultrahuge", "Ultra Nets On Huges", "Ultra nets (x5) are used on huges and above only, never on normal pets", true)
     UI.toggle(s, "wildnew", "Prefer Pets Not Caught Yet", "Breaks ties toward pets missing from your collection", true)
     UI.toggle(s, "tycoonautonets", "Auto Buy Nets", "Turns on the tycoon's own net restock (uses Patch Coins)", false, function(on)
@@ -5272,6 +5762,19 @@ do
         end
     end)
     UI.status(s, "tycoonautonets", "Off")
+    s = UI.section(eventTab, "Event boosts & loot", THEME.good)
+    UI.toggle(s, "cocoa", "Auto Hot Cocoa", "Keeps the coins, damage and luck cocoa boosts topped up", false)
+    UI.status(s, "cocoa", "Off")
+    UI.slider(s, "cocoaMinutes", "Cocoa minutes per top-up", 10, 120, 30, 10)
+    UI.toggle(s, "eventboosts", "Auto Event Boosts", "Starts a Patch Coin / Damage / Island Luck boost from your bag when one runs out, best tier first", false)
+    UI.status(s, "eventboosts", "Off")
+    UI.toggle(s, "eventlootbox", "Auto Open Flannel Gifts", "The event's own lootbox (Patch Coins and boosts) - separate from Auto Open Lootboxes", false)
+    UI.status(s, "eventlootbox", "Off")
+    UI.toggle(s, "turkeys", "Auto Hidden Turkeys", "Event turkeys, claimed as they stream in near you", true)
+    UI.status(s, "turkeys", "")
+    s = UI.section(eventTab, "Season pass", THEME.gold)
+    UI.toggle(s, "eventpass", "Auto Season Pass", "Spends Season Tokens: opens the huge's tier, saves for the huge, then buys the rest", false)
+    UI.status(s, "eventpass", "Off")
 
     -- EGGS: live chances + rare hatch log ---------------------------------
     local eggsTab = hatchTab
@@ -5529,7 +6032,7 @@ do
     end
 
     -- QUESTS: rank quests with live progress and what the solver is doing
-    local questTab = UI.tab("Quests", 5)
+    local questTab = UI.tab("Quests", 4)
     s = UI.section(questTab, "Rank quests", THEME.gold)
     UI.toggle(s, "autoquest", "Auto Rank Quests", "Works out each rank quest and finishes it the fastest way it can", false, function(on)
         if not on then Quest.release() end
@@ -5607,7 +6110,7 @@ do
     UI.toggle(s, "itemcreatorpick", "Auto Pick (15k diamonds)", "Picks the next item for you, huge potions first", false)
     UI.slider(s, "itemCreatorKeep", "Never go below (diamonds)", 0, 2000000, 100000, 50000)
 
-    local rewards = UI.tab("Rewards", 6)
+    local rewards = UI.tab("Rewards", 5)
     s = UI.section(rewards, "Daily claims", THEME.gold)
     UI.toggle(s, "freegifts", "Auto Free Gifts", "Claims each play-time gift the moment it unlocks", true)
     UI.status(s, "freegifts", "")
@@ -5619,10 +6122,6 @@ do
     UI.status(s, "mailbox", "")
     UI.toggle(s, "foreverpack", "Auto Free Pack Slots", "Takes free slots in the Forever Pack, never paid ones", true)
     UI.status(s, "foreverpack", "")
-    UI.toggle(s, "daycare", "Auto Collect Daycare", nil, true)
-    UI.status(s, "daycare", "")
-    UI.toggle(s, "daycareenroll", "Auto Enroll Daycare", "Fills all free slots from one big spare stack, never your best pets", false)
-    UI.status(s, "daycareenroll", "")
     UI.toggle(s, "extraclaims", "Auto Extra Claims", "Welcome-back gift, exclusive daycare, transfers, diamond party", true)
     UI.status(s, "extraclaims", "")
     UI.toggle(s, "spinwheel", "Auto Spinny Wheel", "Spends Spinny Wheel Tickets on the spawn wheel (main world)", false)
@@ -5635,8 +6134,6 @@ do
     UI.status(s, "relics", "")
     UI.toggle(s, "presents", "Auto Hidden Presents", nil, true)
     UI.status(s, "presents", "")
-    UI.toggle(s, "turkeys", "Auto Hidden Turkeys", "Event turkeys, claimed as they stream in near you", true)
-    UI.status(s, "turkeys", "")
     s = UI.section(rewards, "Around the world", Color3.fromRGB(140, 210, 255))
     UI.toggle(s, "machines", "Auto Timed Reward Machines", "Hops onto daily diamond / item / potion machines and back", false)
     UI.status(s, "machines", "")
@@ -5650,7 +6147,7 @@ do
     UI.toggle(s, "areasurge", "Auto Area Surge", "Free every 15 minutes - hops onto the button and back (World 2)", false)
     UI.status(s, "areasurge", "Off")
 
-    local items = UI.tab("Items", 7)
+    local items = UI.tab("Items", 6)
     s = UI.section(items, "Boosts", THEME.good)
     UI.toggle(s, "potions", "Auto Potions", "Keeps one of every potion type running, best tier first", false)
     UI.status(s, "potions", "")
@@ -5678,14 +6175,22 @@ do
     UI.toggle(s, "tnt", "Auto TNT", nil, false)
     UI.status(s, "tnt", "")
 
-    local pets = UI.tab("Pets", 8)
+    local pets = UI.tab("Pets", 7)
+    s = UI.section(pets, "Team", THEME.good)
+    UI.toggle(s, "equipbest", "Auto Equip Best", "Re-equips your strongest pets every 30 seconds", false)
+    UI.status(s, "equipbest", "Off")
+    s = UI.section(pets, "Daycare", Color3.fromRGB(140, 210, 255))
+    UI.toggle(s, "daycare", "Auto Collect Daycare", nil, true)
+    UI.status(s, "daycare", "")
+    UI.toggle(s, "daycareenroll", "Auto Enroll Daycare", "Fills all free slots from one big spare stack, never your best pets", false)
+    UI.status(s, "daycareenroll", "")
     s = UI.section(pets, "Machines", THEME.gold)
     UI.toggle(s, "golden", "Auto Golden", "Turns every 10 of a normal pet into a golden one (skips huges)", false)
     UI.status(s, "golden", "")
     UI.toggle(s, "rainbow", "Auto Rainbow", "Turns every 10 goldens into a rainbow (skips huges)", false)
     UI.status(s, "rainbow", "")
 
-    local progress = UI.tab("Progress", 9)
+    local progress = UI.tab("Progress", 8)
     s = UI.section(progress, "Unlocks", THEME.good)
     UI.toggle(s, "zones", "Auto Buy Next Zone", "Buys the next zone in this world as soon as you can afford it", false)
     UI.status(s, "zones", "")
@@ -5701,14 +6206,14 @@ do
     UI.toggle(s, "vouchers", "Auto Use Slot Vouchers", "Daycare and booth slot vouchers: each is a permanent +1 slot", false)
     UI.status(s, "vouchers", "")
 
-    local misc = UI.tab("Misc", 10)
+    local misc = UI.tab("Misc", 9)
     s = UI.section(misc, "Player", Color3.fromRGB(140, 210, 255))
     UI.toggle(s, "afksaver", "AFK Saver", "While the hub is hidden: 3D rendering off + FPS cap (saves GPU on long farms)", false)
     UI.status(s, "afksaver", "Off")
     UI.slider(s, "afkFps", "AFK Saver FPS cap", 5, 60, 15, 5)
     UI.toggle(s, "autorejoin", "Auto Rejoin", "Rejoins and re-runs the hub if you get disconnected or kicked", false)
     UI.status(s, "autorejoin", "Off")
-    UI.toggle(s, "antiafk", "Anti AFK", "Presses Space every few minutes, like the Pet Dimensions hub", true)
+    UI.toggle(s, "antiafk", "Anti AFK", "Presses Space every few minutes so Roblox never kicks you for idling", true)
     UI.status(s, "antiafk", "")
     UI.slider(s, "afkMinutes", "Anti AFK every (minutes)", 1, 15, 1, 1)
     UI.toggle(s, "walkspeed", "Custom Walk Speed", nil, false)
@@ -5895,6 +6400,7 @@ do
 
     UI.select(farm, true)
 end
+Loader.step("Almost there", 0.92)
 
 ----------------------------------------------------------------------
 -- LIVE UPDATES
@@ -6024,4 +6530,5 @@ env.__PS99HUB_CLEANUP = function()
     pcall(function() UI.gui:Destroy() end)
 end
 
+task.spawn(Loader.finish)
 UI.toast("PS99 HUB READY", "` search  ·  LeftControl hides the hub", THEME.accent)
