@@ -744,14 +744,186 @@ do
                 gui:Destroy()
             end)
         end
-        -- never leave the card up if startup breaks somewhere
-        task.delay(60, function() if not Loader.done then pcall(Loader.finish) end end)
+        -- never leave the card up if startup breaks somewhere (armed once the key is in)
+        function Loader.arm()
+            task.delay(60, function() if not Loader.done then pcall(Loader.finish) end end)
+        end
+
+        -- key entry on the same card, shown before anything else loads
+        local GOOD, BAD = Color3.fromRGB(126, 235, 177), Color3.fromRGB(255, 132, 143)
+        local keyRow = make("Frame", { AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 196), Size = UDim2.new(1, -100, 0, 40),
+            BackgroundColor3 = Color3.fromRGB(34, 22, 44), BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 6, Visible = false }, card)
+        make("UICorner", { CornerRadius = UDim.new(0, 11) }, keyRow)
+        local keyStroke = make("UIStroke", { Color = PINK, Transparency = 0.55, Thickness = 1.2 }, keyRow)
+        local keyBox = make("TextBox", { Position = UDim2.fromOffset(14, 0), Size = UDim2.new(1, -120, 1, 0), BackgroundTransparency = 1, Text = "",
+            PlaceholderText = "Paste your PS99 key", PlaceholderColor3 = MUTED, ClearTextOnFocus = false, Font = Enum.Font.GothamMedium, TextSize = 13,
+            TextColor3 = TEXT, TextXAlignment = Enum.TextXAlignment.Left, ClipsDescendants = true, ZIndex = 7 }, keyRow)
+        local keyBtn = make("TextButton", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -5, 0.5, 0), Size = UDim2.fromOffset(96, 30),
+            BackgroundColor3 = PINK, Text = "UNLOCK", Font = Enum.Font.GothamBlack, TextSize = 12, TextColor3 = Color3.fromRGB(44, 16, 34), ZIndex = 7 }, keyRow)
+        make("UICorner", { CornerRadius = UDim.new(0, 8) }, keyBtn)
+        local closeBtn = make("TextButton", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10), Size = UDim2.fromOffset(26, 26),
+            BackgroundTransparency = 1, Text = "✕", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = MUTED, ZIndex = 8, Visible = false }, card)
+
+        -- check(key) yields and returns ok, message
+        function Loader.askKey(saved, check)
+            track.Visible, pctLabel.Visible = false, false
+            status.Position = UDim2.new(0.5, 0, 0, 250)
+            status.Text = saved ~= "" and "Checking your saved key" or "Enter your key to unlock the hub"
+            keyBox.Text = saved
+            keyRow.Visible, closeBtn.Visible = true, true
+            local busy, passed = false, false
+            local function try()
+                if busy or passed then return end
+                local key = tostring(keyBox.Text or ""):match("^%s*(.-)%s*$")
+                if key == "" then
+                    status.Text, status.TextColor3 = "Paste your key first", Color3.fromRGB(255, 190, 120)
+                    return
+                end
+                busy = true
+                keyBtn.Text, keyBtn.AutoButtonColor = "...", false
+                status.Text, status.TextColor3 = "Checking your key", MUTED
+                local ok, msg = check(key)
+                if not gui.Parent then return end
+                if ok then
+                    passed = true
+                    status.Text, status.TextColor3 = msg, GOOD
+                    keyStroke.Color, keyStroke.Transparency = GOOD, 0.2
+                    keyBtn.Text, keyBtn.BackgroundColor3 = "OK", GOOD
+                    keyBox.TextEditable = false
+                else
+                    status.Text, status.TextColor3 = msg, BAD
+                    keyStroke.Color, keyStroke.Transparency = BAD, 0.3
+                    keyBtn.Text, keyBtn.AutoButtonColor = "UNLOCK", true
+                    busy = false
+                end
+            end
+            local c1 = keyBtn.MouseButton1Click:Connect(try)
+            local c2 = keyBox.FocusLost:Connect(function(enter) if enter then try() end end)
+            local c3 = closeBtn.MouseButton1Click:Connect(function()
+                pcall(function() scene.stop() end)
+                gui:Destroy()
+            end)
+            if saved ~= "" then task.spawn(try) end
+            while gui.Parent and not passed do task.wait(0.1) end
+            c1:Disconnect() c2:Disconnect() c3:Disconnect()
+            if not passed then return false end
+            task.wait(0.6)
+            keyRow.Visible, closeBtn.Visible = false, false
+            status.Position, status.TextColor3 = UDim2.new(0.5, 0, 0, 226), MUTED
+            track.Visible, pctLabel.Visible = true, true
+            return true
+        end
     end)
     if not ok then
         Loader.step = function() end
         Loader.finish = function() end
+        Loader.arm = function() end
+        -- no card to type into: only a saved key can get through
+        Loader.askKey = function(saved, check)
+            if saved == "" then return false end
+            return (check(saved))
+        end
     end
 end
+
+----------------------------------------------------------------------
+-- LICENSE KEY
+-- PS99 keys only (PS99-...). Same license server as Pet Dimensions, but a
+-- key only unlocks the script it was made for. Sends the Roblox account
+-- and hardware ID so they show up on the dashboard. The key is saved to
+-- PS99Hub/key.txt only after the server accepts it.
+----------------------------------------------------------------------
+do
+    local KEY_API_URL = "https://chnkeqywtnmhpsiandyb.supabase.co/functions/v1/key-api"
+    local KEY_API_ANON = "sb_publishable_5HCcuIumhqNPSnnMN-0HvA_wfphlhsv"
+    local KEY_FILE = "PS99Hub/key.txt"
+    local REASONS = {
+        expired = "That key has expired",
+        invalid_key = "That key isn't valid - check it and try again",
+        key_disabled = "That key has been disabled",
+        account_limit = "That key has hit its Roblox account limit",
+        wrong_product = "That key is for a different script - use your PS99 key",
+        missing_data = "Missing account info - rejoin and try again",
+        server_error = "The license server had an error - try again shortly",
+    }
+    local function httpRequest()
+        local fn = env.request or env.http_request
+        if type(fn) ~= "function" and type(syn) == "table" then fn = syn.request end
+        if type(fn) ~= "function" and type(http) == "table" then fn = http.request end
+        return type(fn) == "function" and fn or nil
+    end
+    local function deviceInfo()
+        local hwid
+        for _, name in ipairs({ "gethwid", "get_hwid", "getexecutorhwid" }) do
+            local fn = env[name]
+            if type(fn) == "function" then
+                local ok, value = pcall(fn)
+                if ok and value ~= nil and tostring(value) ~= "" then hwid = tostring(value) break end
+            end
+        end
+        if not hwid then
+            local ok, id = pcall(function() return game:GetService("RbxAnalyticsService"):GetClientId() end)
+            if ok and id then hwid = "client:" .. tostring(id) end
+        end
+        local executor = ""
+        if type(identifyexecutor) == "function" then
+            local ok, name, version = pcall(identifyexecutor)
+            if ok and name then executor = tostring(name) .. (version and (" " .. tostring(version)) or "") end
+        end
+        return hwid or "", executor
+    end
+    local function readKey()
+        if type(env.__PS99HUB_KEY) == "string" and env.__PS99HUB_KEY ~= "" then return env.__PS99HUB_KEY end
+        local ok, value = pcall(function() return isfile(KEY_FILE) and readfile(KEY_FILE) or "" end)
+        return ok and type(value) == "string" and value:match("^%s*(.-)%s*$") or ""
+    end
+    local function saveKey(key)
+        env.__PS99HUB_KEY = key
+        pcall(function()
+            if makefolder and not (isfolder and isfolder("PS99Hub")) then makefolder("PS99Hub") end
+            writefile(KEY_FILE, key)
+        end)
+    end
+    local function check(key)
+        local request = httpRequest()
+        if not request then return false, "Your executor has no HTTP request function" end
+        local hwid, executor = deviceInfo()
+        local okR, res = pcall(request, {
+            Url = KEY_API_URL,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json", ["apikey"] = KEY_API_ANON, ["Authorization"] = "Bearer " .. KEY_API_ANON },
+            Body = HttpService:JSONEncode({
+                action = "validate", product = "ps99", key = key,
+                user_id = tostring(LocalPlayer.UserId), username = LocalPlayer.Name, display_name = LocalPlayer.DisplayName,
+                place_id = tostring(game.PlaceId), job_id = tostring(game.JobId),
+                hwid = hwid, executor = executor,
+            }),
+        })
+        if not okR or type(res) ~= "table" then return false, "Couldn't reach the license server" end
+        local code = tonumber(res.StatusCode or res.Status) or 0
+        local okJ, body = pcall(function() return HttpService:JSONDecode(res.Body or "") end)
+        if not okJ or type(body) ~= "table" then body = {} end
+        if code >= 200 and code < 300 and body.valid == true then
+            if body.product ~= nil and body.product ~= "ps99" then
+                return false, REASONS.wrong_product
+            end
+            saveKey(key)
+            if body.lifetime then return true, "Key accepted  ·  lifetime access" end
+            local left
+            pcall(function() left = (DateTime.fromIsoDate(body.expires_at).UnixTimestamp - os.time()) / 86400 end)
+            if left then
+                return true, left >= 1 and ("Key accepted  ·  %d day%s left"):format(math.floor(left), math.floor(left) == 1 and "" or "s")
+                    or ("Key accepted  ·  %d hours left"):format(math.max(1, math.floor(left * 24)))
+            end
+            return true, "Key accepted"
+        end
+        return false, REASONS[body.reason] or body.message or body.error or ("License server returned HTTP " .. code)
+    end
+    if not Loader.askKey(readKey(), check) then
+        error("PS99 Hub needs a valid key", 0)
+    end
+end
+Loader.arm()
 Loader.step("Loading the game's modules", 0.08)
 
 ----------------------------------------------------------------------
