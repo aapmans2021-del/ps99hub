@@ -986,7 +986,10 @@ do
         Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = THEME.muted, AutoButtonColor = false, ZIndex = 3 }, sidebar)
     corner(search, 10)
     pad(search, 12)
-    local tabList = new("Frame", { Position = UDim2.fromOffset(10, 50), Size = UDim2.new(1, -20, 1, -60), BackgroundTransparency = 1, ZIndex = 3 }, sidebar)
+    -- scrolls once there are more tabs than fit
+    local tabList = new("ScrollingFrame", { Position = UDim2.fromOffset(10, 50), Size = UDim2.new(1, -20, 1, -60), BackgroundTransparency = 1,
+        BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = THEME.accent, ScrollBarImageTransparency = 0.4,
+        CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y, ZIndex = 3 }, sidebar)
     new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, tabList)
     local glider = new("Frame", { AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.fromOffset(4, 22), BackgroundColor3 = THEME.accent,
         Visible = false, ZIndex = 6 }, sidebar)
@@ -1029,6 +1032,12 @@ do
     local function moveGlider(btn, instant)
         local sx = sidebar.AbsoluteSize.X / math.max(1, sidebar.Size.X.Offset)
         if btn.AbsoluteSize.Y < 2 or sx <= 0 then return end
+        -- the selected tab is scrolled out of view: hide the marker
+        local mid = btn.AbsolutePosition.Y + btn.AbsoluteSize.Y / 2
+        if mid < tabList.AbsolutePosition.Y or mid > tabList.AbsolutePosition.Y + tabList.AbsoluteSize.Y then
+            glider.Visible = false
+            return
+        end
         local y = (btn.AbsolutePosition.Y - sidebar.AbsolutePosition.Y + btn.AbsoluteSize.Y / 2) / sx
         local target = UDim2.fromOffset(3, y)
         if instant or not glider.Visible then
@@ -1042,6 +1051,9 @@ do
             end)
         end
     end
+    tabList:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+        if UI.current then moveGlider(UI.current.button, true) end
+    end)
     function UI.select(tab, instant)
         for _, t in ipairs(UI.tabs) do
             local active = t == tab
@@ -1730,12 +1742,25 @@ local loopCursor = 1
 task.spawn(function()
     while alive() do
         local now = os.clock()
+        -- fast lane: tiny, frequent checks (ultimate, tycoon buys, wild throws)
+        -- don't wait behind the heavier features
+        for _, l in ipairs(loops) do
+            if l.interval <= 0.5 and S.on[l.key] and now >= l.next and not l.running then
+                l.next = now + l.interval
+                l.running = true
+                task.spawn(function()
+                    local ok, err = pcall(l.fn)
+                    if not ok then setStatus(l.key, "error: " .. tostring(err):sub(1, 80)) end
+                    l.running = false
+                end)
+            end
+        end
         if activeLoopWorkers < MAX_ACTIVE_LOOP_WORKERS and now >= nextLoopLaunch then
             local total = #loops
             for offset = 0, total - 1 do
                 local index = ((loopCursor + offset - 1) % total) + 1
                 local l = loops[index]
-                if S.on[l.key] and now >= l.next and not l.running then
+                if l.interval > 0.5 and S.on[l.key] and now >= l.next and not l.running then
                     l.next = now + l.interval
                     l.running = true
                     activeLoopWorkers += 1
@@ -1760,6 +1785,75 @@ task.spawn(function()
         task.wait(0.1)
     end
 end)
+-- react to the save instead of waiting for each loop's timer: a new item,
+-- a boost running out or a zone unlock runs the matching features at once
+do
+    local WAKE = {
+        Inventory = { "lootboxes", "eventlootbox", "giftbags", "keys", "golden", "rainbow", "fruits", "potions", "toys", "eventboosts", "daycareenroll" },
+        Boosts = { "eventboosts", "potions", "fruits" },
+        UnlockedZones = { "zones", "rebirth", "autoquest" },
+        Rebirths = { "zones", "autoquest", "equipslots" },
+        Goals = { "autoquest" },
+        EventPasses = { "eventpass" },
+    }
+    local pending, queued = {}, false
+    local lastKick = {}
+    local invSig = nil
+    -- coins and diamonds live in the inventory too and change several times a
+    -- second while farming; only wake things up when real items change
+    local function itemSignature()
+        local inv = (save() or {}).Inventory
+        if type(inv) ~= "table" then return nil end
+        local stacks = 0
+        for cls, bag in pairs(inv) do
+            if cls ~= "Currency" and cls ~= "Pet" and type(bag) == "table" then
+                for _, it in pairs(bag) do
+                    stacks += 1 + (type(it) == "table" and (tonumber(it._am) or 1) or 0)
+                end
+            end
+        end
+        return stacks
+    end
+    local conn
+    local ok = pcall(function()
+        conn = G.Save.StatChanged:Connect(function(stat)
+            local keys = WAKE[stat]
+            if not keys or not S.alive then return end
+            for _, k in ipairs(keys) do pending[k] = stat end
+            if queued then return end
+            queued = true
+            -- coalesce bursts, and never wake the same feature more than
+            -- once every 4 seconds
+            task.delay(1, function()
+                queued = false
+                local invChanged = true
+                for _, stat2 in pairs(pending) do
+                    if stat2 == "Inventory" then
+                        local sig = itemSignature()
+                        invChanged = sig ~= invSig
+                        invSig = sig
+                        break
+                    end
+                end
+                local now = os.clock()
+                for k, stat2 in pairs(pending) do
+                    pending[k] = nil
+                    if (stat2 ~= "Inventory" or invChanged) and S.on[k] and now - (lastKick[k] or 0) >= 4 then
+                        lastKick[k] = now
+                        F.kick(k)
+                    end
+                end
+            end)
+        end)
+    end)
+    invSig = itemSignature()
+    if ok and conn then
+        task.spawn(function()
+            while alive() do task.wait(1) end
+            pcall(function() conn:Disconnect() end)
+        end)
+    end
+end
 
 -- EGG FINDER ---------------------------------------------------------
 -- Worlds lay their eggs out differently: some name the model after the egg
@@ -1875,7 +1969,7 @@ do
     end
     F.nearestEgg = nearestEgg
     RunService.Heartbeat:Connect(function()
-        if S.on.hatch and alive() and G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
+        if (S.on.hatch or S.lastHatching) and alive() and G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
     end)
     local running = false
     local inFlight = 0
@@ -1976,6 +2070,39 @@ do
     -- shared by every farm: send each of your pets to its own breakable with
     -- the game's SetTarget, least-crowded first, and keep it there until it
     -- breaks. `assigned` (euid -> model) persists between calls.
+    -- a breakable that spawned after every pet already had one would sit
+    -- untouched until something else broke; pull a pet off the most
+    -- crowded breakable onto each empty one (nearest pet goes)
+    function F.levelLoad(pets, targets, assigned, load, join, posOf)
+        local moved = 0
+        for _, empty in ipairs(targets) do
+            if load[empty] == 0 then
+                local crowded
+                for _, b in ipairs(targets) do
+                    if load[b] >= 2 and (not crowded or load[b] > load[crowded]) then crowded = b end
+                end
+                if not crowded then break end
+                local pick, pickD
+                local ep = posOf(empty)
+                for _, e in ipairs(pets) do
+                    if assigned[e.euid] == crowded then
+                        local okP, pp = pcall(function() return e.pet.cpet.primaryPart.Position end)
+                        local d = (okP and ep) and (pp - ep).Magnitude or 0
+                        if not pickD or d < pickD then pick, pickD = e, d end
+                    end
+                end
+                if pick then
+                    load[crowded] -= 1
+                    load[empty] = 1
+                    assigned[pick.euid] = empty
+                    pcall(function() pick.pet:SetTarget(empty) end)
+                    join[pick.euid] = empty.Name
+                    moved += 1
+                end
+            end
+        end
+        return moved > 0
+    end
     function F.drivePets(assigned, targets)
         local pets = {}
         local okB, list = pcall(G.PlayerPet.GetByPlayer, LocalPlayer)
@@ -2030,6 +2157,7 @@ do
                 end
             end
         end
+        if F.levelLoad(pets, targets, assigned, load, join, posOf) then changed = true end
         local present = {}
         for _, e in ipairs(pets) do present[e.euid] = true end
         for euid in pairs(assigned) do if not present[euid] then assigned[euid] = nil end end
@@ -2044,6 +2172,16 @@ do
         for _, pet in pairs(okB and type(list) == "table" and list or {}) do pcall(function() pet:ClearTarget() end) end
     end
 
+    -- Fast Pets: x200 pet movement everywhere (main world, tycoon, any area),
+    -- no matter which farm is running; just its own switch
+    task.spawn(function()
+        while alive() do
+            env.__PS99HUB_FARM_ON = S.on.fastpets ~= false
+            task.wait(0.5)
+        end
+        env.__PS99HUB_FARM_ON = false
+    end)
+
     local running = false
     function F.startFarm()
         if running then return end
@@ -2051,7 +2189,6 @@ do
         task.spawn(function()
             local breakFolder = G.THINGS:WaitForChild("Breakables", 10)
             local conns = {}
-            env.__PS99HUB_FARM_ON = true
             local hits = 0
             -- euid -> breakable model this pet is working on
             local assigned = {}
@@ -2083,9 +2220,59 @@ do
                 local root = hrp()
                 -- the whole area: the quest's area if one is locked, otherwise
                 -- the area you are standing in (any distance inside it)
-                local zoneLock, focusWords = S.farmZone, S.farmFocus
+                local zoneLock, focusWords = S.farmZone or S.areaFarmZone, S.farmFocus
                 local area = zoneLock
+                -- the event island: the game still reports a main-world zone
+                -- there, so use the area of YOUR island you're standing in
+                -- (breakables tagged "<Section>_Zone_<your plot>")
+                local islandArea
+                -- the game's own Auto Farm: if it's on, farm the area it was
+                -- set in and stay there, even when you walk somewhere else
+                local autoFarmArea = false
                 if not area then
+                    local okE, enabled = pcall(function() return require(RS.Library.Client.AutoFarmCmds).IsEnabled() end)
+                    if okE and enabled then
+                        local okZ, part = pcall(function() return require(RS.Library.Client.AutoFarmCmds).GetWholeFarmZone() end)
+                        if okZ and typeof(part) == "Instance" then
+                            local plots = G.THINGS:FindFirstChild("Plots")
+                            local plotModel = plots and part:IsDescendantOf(plots) and part
+                            while plotModel and plotModel.Parent ~= plots do plotModel = plotModel.Parent end
+                            if plotModel then
+                                -- event island: "<Section>_Zone" + "_<plot>"
+                                islandArea = part.Name .. "_" .. plotModel.Name
+                            else
+                                -- main world: the "<n> | <Area name>" folder above the floor
+                                local f = part
+                                while f and f.Parent and not f.Name:match("^%d+%s*|%s*.+$") do f = f.Parent end
+                                area = f and f.Name:match("^%d+%s*|%s*(.+)$") or nil
+                            end
+                            autoFarmArea = (islandArea or area) ~= nil
+                        end
+                        if not autoFarmArea then
+                            local okP, parentId = pcall(function() return require(RS.Library.Client.AutoFarmCmds).GetTargetParentId() end)
+                            if okP and type(parentId) == "string" and parentId ~= "PumpkinTycoon" then area, autoFarmArea = parentId, true end
+                        end
+                    end
+                end
+                if not area and not islandArea and root then
+                    local _, myModel = Tycoon.plot()
+                    if myModel then
+                        local suffix = "_" .. myModel.Name
+                        local best, bestD
+                        for _, b in ipairs(breakFolder:GetChildren()) do
+                            local a = b:GetAttribute("AreaID")
+                            if type(a) == "string" and a:sub(-#suffix) == suffix then
+                                local okP, pos = pcall(function() return b:GetPivot().Position end)
+                                if okP then
+                                    local d = (pos - root.Position).Magnitude
+                                    if not bestD or d < bestD then best, bestD = a, d end
+                                end
+                            end
+                        end
+                        islandArea = best
+                    end
+                end
+                if not area and not islandArea then
                     local okZ, cz = pcall(function() return G.MapCmds.GetCurrentZone() end)
                     area = okZ and cz or nil
                 end
@@ -2094,7 +2281,9 @@ do
                     for _, b in ipairs(breakFolder:GetChildren()) do
                         if usable(b) then
                             local ok
-                            if area then
+                            if islandArea then
+                                ok = b:GetAttribute("AreaID") == islandArea
+                            elseif area then
                                 ok = b:GetAttribute("ParentID") == area
                             else
                                 local okP, pos = pcall(function() return b:GetPivot().Position end)
@@ -2164,6 +2353,7 @@ do
                             end
                         end
                     end
+                    if F.levelLoad(pets, targets, assigned, load, join, posOf) then changed = true end
                     -- forget pets that were unequipped
                     local present = {}
                     for _, entry in ipairs(pets) do present[entry.euid] = true end
@@ -2174,7 +2364,8 @@ do
                     if hits % 15 == 0 then
                         local busy = 0
                         for _, l in pairs(load) do if l > 0 then busy += 1 end end
-                        setStatus("farm", ("Farming %s  ·  %d pets on %d of %d breakables%s"):format(tostring(area or "nearby"), #pets, busy, #targets,
+                        setStatus("farm", ("Farming %s%s  ·  %d pets on %d of %d breakables%s"):format(tostring(islandArea and islandArea:gsub("_Zone_%d+$", "") or area or "nearby"),
+                            autoFarmArea and " (Auto Farm area)" or "", #pets, busy, #targets,
                             #focus > 0 and "  ·  quest targets first" or ""))
                     end
                     task.wait(0.1)
@@ -2185,7 +2376,6 @@ do
             end
             -- hand the pets back to the game
             for _, entry in ipairs(myPets()) do pcall(function() entry.pet:ClearTarget() end) end
-            env.__PS99HUB_FARM_ON = false
             for _, c in ipairs(conns) do c:Disconnect() end
             setStatus("farm", "Off")
             running = false
@@ -2358,6 +2548,8 @@ do
                     local h = UI.handles and UI.handles.tycoonfarm
                     if h then h.set(true, true) end
                     Tycoon.retarget = true
+                    -- a new area was bought: pets (and the game's Auto Farm) move there
+                    Tycoon.moveToNewArea = true
                 end
                 task.wait(0.3)
             else
@@ -2380,18 +2572,24 @@ do
         if not plot then return setStatus("tycoonupgrades", "Join the Pumpkin Tycoon event to use this") end
         local okT, tokens = pcall(m.UpgradesClient.Tokens)
         tokens = okT and tonumber(tokens) or 0
-        local best
+        local best, cheapest
         for _, id in ipairs(UPGRADE_ORDER) do
             if m.Upgrades.ROWS[id] and not best then
                 local tier = m.UpgradesClient.Tier(id) or 0
                 local okMax, max = pcall(m.UpUtil.MaxTier, id)
                 if okMax and tier < max then
                     local okC, cost = pcall(m.UpgradesClient.Cost, id, tier + 1)
-                    if okC and type(cost) == "number" and cost <= tokens then best = { id = id, cost = cost, tier = tier + 1 } end
+                    if okC and type(cost) == "number" then
+                        if cost <= tokens then best = { id = id, cost = cost, tier = tier + 1 }
+                        elseif not cheapest or cost < cheapest.cost then cheapest = { id = id, cost = cost, tier = tier + 1 } end
+                    end
                 end
             end
         end
-        if not best then return setStatus("tycoonupgrades", ("Saving tokens  ·  %d now"):format(tokens)) end
+        if not best then
+            if not cheapest then return setStatus("tycoonupgrades", "Every token upgrade is maxed") end
+            return setStatus("tycoonupgrades", ("Saving for %s tier %d  ·  %d / %d tokens"):format(cheapest.id, cheapest.tier, tokens, cheapest.cost))
+        end
         local ok, success, reason = pcall(function() return plot:Invoke(m.UpgradesClient.VERB_BUY, best.id) end)
         if ok and success == true then
             S.counts.tycoon += 1
@@ -2401,12 +2599,12 @@ do
         end
     end)
 
-    -- zone farm: stand in the best zone, pets on every breakable there    local running = false
+    -- zone farm: stand in the best zone, pets on every breakable there
+    local running = false
     function Tycoon.startFarm()
         if running then return end
         running = true
         task.spawn(function()
-            env.__PS99HUB_FARM_ON = true
             local section, slab, zoneName, lastTp, spot, eggName = nil, nil, nil, 0, nil, nil
             local hits, prefix = 0, nil
             local assigned = {}
@@ -2437,7 +2635,39 @@ do
                         lastTp = 0
                     end
                     local root = hrp()
-                    if spot and root and not moving then
+                    -- the game's own Auto Farm wins: farm the area it was set in
+                    -- and never move you (teleporting would switch it off)
+                    local afPrefix
+                    -- just bought a new area: go there and re-start the game's Auto
+                    -- Farm from inside it, so everything moves to the new area
+                    if Tycoon.moveToNewArea and spot and root and not moving then
+                        Tycoon.moveToNewArea = false
+                        local AF
+                        pcall(function() AF = require(RS.Library.Client.AutoFarmCmds) end)
+                        local hadAutoFarm = AF and select(2, pcall(AF.IsEnabled)) == true
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        root.CFrame = spot
+                        lastTp = os.clock()
+                        task.wait(1)
+                        if AF and hadAutoFarm then
+                            pcall(AF.Disable)
+                            task.wait(0.3)
+                            pcall(AF.Enable)
+                        end
+                        UI.toast("NEW AREA", ("Pets moved to %s"):format(tostring(zoneName or section)), THEME.good)
+                    end
+                    pcall(function()
+                        local AF = require(RS.Library.Client.AutoFarmCmds)
+                        if AF.IsEnabled() then
+                            local part = AF.GetWholeFarmZone()
+                            local _, myModel = Tycoon.plot()
+                            if typeof(part) == "Instance" and myModel and part:IsDescendantOf(myModel) then
+                                afPrefix = part.Name .. "_" .. myModel.Name
+                            end
+                        end
+                    end)
+                    Tycoon.autoFarmArea = afPrefix
+                    if not afPrefix and spot and root and not moving then
                         local off = root.Position - spot.Position
                         if Vector3.new(off.X, 0, off.Z).Magnitude > 6 and os.clock() - lastTp > 3 then
                             root.AssemblyLinearVelocity = Vector3.zero
@@ -2446,10 +2676,11 @@ do
                         end
                     end
                     local valid = {}
-                    if prefix then
+                    local useArea = afPrefix or prefix
+                    if useArea then
                         for _, b in ipairs(G.THINGS.Breakables:GetChildren()) do
                             local area = b:GetAttribute("AreaID")
-                            if b:IsA("Model") and area == prefix then valid[#valid + 1] = b end
+                            if b:IsA("Model") and area == useArea then valid[#valid + 1] = b end
                         end
                     end
                     -- same fast targeting as Fast Farm: every pet on its own
@@ -2458,7 +2689,8 @@ do
                     if #valid > 0 and petCount > 0 then
                         hits += 1
                         if hits % 15 == 0 then
-                            setStatus("tycoonfarm", ("Farming %s  ·  %d pets on %d of %d breakables"):format(tostring(zoneName or section), petCount, busy, #valid))
+                            setStatus("tycoonfarm", afPrefix and ("Farming %s (your Auto Farm area)  ·  %d pets on %d of %d breakables"):format((afPrefix:gsub("_Zone_%d+$", "")), petCount, busy, #valid)
+                                or ("Farming %s  ·  %d pets on %d of %d breakables"):format(tostring(zoneName or section), petCount, busy, #valid))
                         end
                         task.wait(0.1)
                     else
@@ -2469,7 +2701,6 @@ do
             end
             if lootConn then lootConn:Disconnect() end
             F.releasePets()
-            env.__PS99HUB_FARM_ON = S.on.farm == true
             running = false
         end)
     end
@@ -2731,27 +2962,53 @@ end)
 -- instant boxes go up to 100 at once, boxes that drop on the floor shrink
 -- their batch whenever the game says there is not enough space
 local lootBatch = {}
-loop("lootboxes", 1.5, function()
+-- the event's own lootbox goes through the tycoon, not the normal opener
+local EVENT_LOOTBOX = "Flannel Gift"
+pcall(function() EVENT_LOOTBOX = require(RS.Library.Types.PumpkinTycoon.Buttons).COMPLETION_GIFT or EVENT_LOOTBOX end)
+-- Opens as many as the game will take per call: instant boxes go 500 at a
+-- time; boxes that land on the floor are tried big-to-small in the same
+-- pass (the only limit is free floor space), and the size that worked is
+-- remembered and grown. Runs in the fast lane while there is anything left.
+loop("lootboxes", 0.5, function()
     if not G.LootboxCmds then return end
+    -- cheap check on the save first; the full inventory walk only runs
+    -- when there is actually a box to open
+    local wantIds = {}
+    local bag = ((save() or {}).Inventory or {}).Lootbox
+    if type(bag) == "table" then
+        for _, it in pairs(bag) do
+            local id = type(it) == "table" and it.id
+            if type(id) == "string" and id ~= EVENT_LOOTBOX and not id:find("Locked") then wantIds[id] = true end
+        end
+    end
+    if not next(wantIds) then
+        return setStatus("lootboxes", ("Nothing left to open  ·  %s this session"):format(commas(S.counts.lootboxes)))
+    end
     local opened, kinds = 0, 0
     for _, item in pairs(inventoryItems(true)) do
         local id = itemId(item)
-        local okD, dir = pcall(function() return item:Directory() end)
-        if id and okD and type(dir) == "table" and dirGet("Lootboxes", id) and not id:find("Locked") and not dir.IsCardPack then
-            local have = item:GetAmount()
-            local cap = lootBatch[id] or (dir.Instant and 100 or 25)
-            local amt = math.min(have, cap)
-            if amt > 0 then
+        local okD, dir = false, nil
+        if id and wantIds[id] then okD, dir = pcall(function() return item:Directory() end) end
+        if id and id ~= EVENT_LOOTBOX and okD and type(dir) == "table" and dirGet("Lootboxes", id) and not id:find("Locked") and not dir.IsCardPack then
+            local have = tonumber(item:GetAmount()) or 0
+            if have > 0 then
                 kinds += 1
-                local okC, ok, msg = pcall(G.LootboxCmds.Open, item, amt)
-                if okC and ok then
-                    opened += amt
-                    S.counts.lootboxes += amt
-                    lootBatch[id] = math.min(100, cap + 5)
-                elseif tostring(msg):lower():find("space") then
-                    lootBatch[id] = math.max(1, math.floor(cap / 2))
+                local cap = lootBatch[id] or (dir.Instant and 500 or 100)
+                local amt = math.min(have, cap)
+                while amt >= 1 do
+                    local okC, ok, msg = pcall(G.LootboxCmds.Open, item, amt)
+                    if okC and ok then
+                        opened += amt
+                        S.counts.lootboxes += amt
+                        lootBatch[id] = math.min(dir.Instant and 1000 or 200, math.max(cap, amt) + 10)
+                        break
+                    elseif tostring(msg):lower():find("space") and amt > 1 then
+                        amt = math.max(1, math.floor(amt / 2))
+                        lootBatch[id] = amt
+                    else
+                        break
+                    end
                 end
-                task.wait(0.35)
             end
         end
     end
@@ -2759,6 +3016,33 @@ loop("lootboxes", 1.5, function()
         setStatus("lootboxes", ("Opened %d box%s  ·  %s this session"):format(opened, opened == 1 and "" or "es", commas(S.counts.lootboxes)))
     elseif kinds == 0 then
         setStatus("lootboxes", ("Nothing left to open  ·  %s this session"):format(commas(S.counts.lootboxes)))
+    end
+end)
+-- EVENT LOOTBOX: Flannel Gifts (Patch Coins and boosts), opened through the
+-- tycoon's own opener, which refuses calls that come too fast
+loop("eventlootbox", 1.5, function()
+    local okG, Gift = pcall(function() return require(RS.Library.Client.PumpkinTycoonCmds.Gift) end)
+    if not okG then return setStatus("eventlootbox", "Only works with the Pumpkin Tycoon event") end
+    local item
+    for _, it in pairs(inventoryItems(true)) do
+        if itemId(it) == EVENT_LOOTBOX then item = it break end
+    end
+    local have = item and tonumber(item:GetAmount()) or 0
+    if have <= 0 then return setStatus("eventlootbox", ("No %ss left  ·  %s opened this session"):format(EVENT_LOOTBOX, commas(S.counts.eventlootbox or 0))) end
+    local amt = math.min(have, S.eventLootCap or 50)
+    local ok, a, b = pcall(Gift.Open, item, amt)
+    if ok and a then
+        S.counts.eventlootbox = (S.counts.eventlootbox or 0) + amt
+        S.eventLootCap = math.min(200, amt + 10)
+        setStatus("eventlootbox", ("Opened %d %s%s  ·  %s this session"):format(amt, EVENT_LOOTBOX, amt == 1 and "" or "s", commas(S.counts.eventlootbox)))
+    else
+        local why = tostring(ok and b or a)
+        if why:lower():find("fast") then
+            setStatus("eventlootbox", "Waiting a moment (the tycoon limits how fast gifts open)")
+        else
+            S.eventLootCap = math.max(1, math.floor(amt / 2))
+            setStatus("eventlootbox", "Open refused: " .. why)
+        end
     end
 end)
 do
@@ -2897,32 +3181,40 @@ loop("rainbow", 2, function()
     setStatus("rainbow", ("%d rainbow made this session"):format(S.counts.rainbow))
 end)
 -- PROGRESS -------------------------------------------------------------
-loop("zones", 1, function()
-    if inInstance() or not G.ZoneCmds then return setStatus("zones", "Zones are bought in the main world") end
-    local okN, nextZone = pcall(G.ZoneCmds.GetNextZone)
-    if not okN or not nextZone then return setStatus("zones", "Every zone in this world is open") end
-    -- buy every area you can afford right now, one after another
-    local bought = {}
+-- buy every area you can afford right now, one after another (shared by
+-- Auto Buy Next Zone and Auto Area Farm); returns the names bought and why
+-- it stopped
+function F.buyNextZones(key)
+    local bought, why = {}, nil
     for _ = 1, 25 do
-        if not S.on.zones then break end
+        if not S.on[key] then break end
         local okN2, nz = pcall(G.ZoneCmds.GetNextZone)
-        if not okN2 or not nz then break end
+        if not okN2 or not nz then why = "every zone in this world is open" break end
         local name = type(nz) == "table" and (nz._id or nz.ZoneName) or nz
         local ok, msg = invoke("Zones_RequestPurchase", name)
-        if not ok then
-            if #bought == 0 then setStatus("zones", ("Next: %s  ·  %s"):format(tostring(name), tostring(msg or "saving up"))) end
-            break
-        end
+        if not ok then why = ("next: %s  ·  %s"):format(tostring(name), tostring(msg or "saving up")) break end
         S.counts.zones += 1
         bought[#bought + 1] = tostring(name)
         task.wait(0.15)
     end
     if #bought > 0 then
         UI.toast(#bought == 1 and "ZONE UNLOCKED" or ("%d ZONES UNLOCKED"):format(#bought), bought[#bought], THEME.good)
-        setStatus("zones", ("Bought %s  ·  %d this session"):format(table.concat(bought, ", "), S.counts.zones))
         -- the best area just moved: re-plan quests and re-target the farm now
         F.kick("autoquest")
+        F.kick("areafarm")
+    end
+    return bought, why
+end
+loop("zones", 1, function()
+    if inInstance() or not G.ZoneCmds then return setStatus("zones", "Zones are bought in the main world") end
+    local okN, nextZone = pcall(G.ZoneCmds.GetNextZone)
+    if not okN or not nextZone then return setStatus("zones", "Every zone in this world is open") end
+    local bought, why = F.buyNextZones("zones")
+    if #bought > 0 then
+        setStatus("zones", ("Bought %s  ·  %d this session"):format(table.concat(bought, ", "), S.counts.zones))
         F.kick("zones")
+    elseif why then
+        setStatus("zones", (why:gsub("^%l", string.upper)))
     end
 end)
 loop("rebirth", 3, function()
@@ -3261,6 +3553,10 @@ do
                 local net
                 if huge and ultras > 0 and S.on.wildultrahuge ~= false then net = "Ultra Pet Net"
                 elseif nets > 0 then net = "Pet Net" end
+                local maxChance = (tonumber(Settings.values.wildMax) or 30) / 100
+                local baseChance0 = tonumber(phys.CatchChance) or 1
+                -- only the rare ones: skip anything easier than your limit (huges always count)
+                if net and not huge and baseChance0 > maxChance then net = nil end
                 if net then
                     local baseChance = tonumber(phys.CatchChance) or 0
                     local displayChance = math.min(1, baseChance * netMult(net))
@@ -3311,10 +3607,40 @@ do
             if S.on.tycoonautonets then return setStatus("wildcatch", "Out of nets  ·  waiting for the tycoon to restock") end
             return setStatus("wildcatch", "Out of Pet Nets  ·  turn on Auto Buy Nets")
         end
+        -- every spawn on your island, straight from its save (loaded or not)
+        local maxChance = (tonumber(Settings.values.wildMax) or 30) / 100
+        local saved = {}
+        pcall(function() saved = plot:Save(m.Types.VAR.Wild) or {} end)
+        local loaded = {}
+        for slot in pairs(Wild.All() or {}) do loaded[tostring(slot)] = true end
+        local rarest, scoutZone
+        for slot, w in pairs(saved) do
+            if type(w) == "table" and tonumber(w.C) then
+                if not rarest or w.C < rarest.C then rarest = w end
+                local huge = hugeTier(w.P)
+                if (huge or w.C <= maxChance) and not loaded[tostring(slot)] then scoutZone = scoutZone or w.Z end
+            end
+        end
+        -- a rare spawn that isn't streamed in yet: hop to its wild area so it loads
+        if scoutZone and os.clock() - (WildStats.lastScout or 0) > 20 then
+            WildStats.lastScout = os.clock()
+            local _, myModel = Tycoon.plot()
+            local area = myModel and myModel:FindFirstChild("WildAreas") and myModel.WildAreas:FindFirstChild("WildArea_" .. tostring(scoutZone))
+            if area then
+                withTeleport(function(root)
+                    root.CFrame = CFrame.new(area.Position + Vector3.new(0, 5, 0))
+                    task.wait(1.5)
+                end)
+            end
+        end
         local list = candidates(Wild, plot, nets, ultras, attemptedPets)
+        if #list == 0 and nets == 0 then
+            return setStatus("wildcatch", ("Out of Pet Nets (%d Ultra kept for huges)%s  ·  turn on Auto Buy Nets"):format(ultras,
+                rarest and ("  ·  rarest waiting: %s %d%%"):format(tostring(rarest.P), rarest.C * 100) or ""))
+        end
         if #list == 0 then
-            return setStatus("wildcatch", ("No available wild pets  ·  %d nets, %d ultra  ·  caught %d"):format(
-                nets, ultras, WildStats.caught))
+            return setStatus("wildcatch", ("Nothing at %d%% or rarer right now%s  ·  %d nets  ·  caught %d"):format(maxChance * 100,
+                rarest and ("  ·  rarest is %s at %d%%"):format(tostring(rarest.P), rarest.C * 100) or "", nets, WildStats.caught))
         end
         local lastText
         withTeleport(function(root)
@@ -3492,6 +3818,206 @@ loop("cocoa", 8, function()
         setStatus("cocoa", ("Bought %d min of %s cocoa"):format(minutes, table.concat(bought, ", ")))
     else
         setStatus("cocoa", "Cocoa refused: " .. tostring(reason))
+    end
+end)
+-- SEASON PASS ----------------------------------------------------------------
+-- Spends Season Tokens on the event pass. A tier opens once enough tokens have
+-- been spent, so it buys the cheapest open card until the huge's tier opens,
+-- then saves every token for the huge. After that it clears the rest cheapest
+-- first.
+local Pass = {}
+env.__PS99HUB_PASS = Pass
+function Pass.read()
+    local okU, U = pcall(function() return require(RS.Library.Util.EventPassUtil) end)
+    local okC, EP = pcall(function() return require(RS.Library.Client.EventPassCmds) end)
+    if not (okU and okC) then return nil end
+    local okR, st = pcall(EP.Read)
+    if not okR or type(st) ~= "table" then return nil end
+    -- Read() hands back its tables as JSON text
+    local out = {}
+    for k, v in pairs(st) do
+        if type(v) == "string" and (v:sub(1, 1) == "{" or v:sub(1, 1) == "[") then
+            local okJ, dec = pcall(HttpService.JSONDecode, HttpService, v)
+            out[k] = okJ and dec or v
+        elseif v == "true" or v == "false" then
+            out[k] = v == "true"
+        else
+            out[k] = v
+        end
+    end
+    st = out
+    if not st.HasState or not st.Live then return nil end
+    local d = U.Get(U.Current() or "")
+    local set = d and (tonumber(st.Week) or 0) > 0 and U.WeekSet(d, st.Week)
+    if type(set) ~= "table" or type(set.Tiers) ~= "table" then return nil end
+    return st, set, U, EP
+end
+function Pass.flag(U, fname, r)
+    if type(U[fname]) ~= "function" then return false end
+    local ok, v = pcall(U[fname], r)
+    return ok and v == true
+end
+function Pass.name(r)
+    local ok, item = pcall(r.Item)
+    if not ok or not item then return r.Key end
+    local okN, n, a = pcall(function() return item:GetName(), item:GetAmount() end)
+    if not okN or type(n) ~= "string" then return r.Key end
+    return (tonumber(a) or 1) > 1 and ("%sx %s"):format(short(a), n) or n
+end
+function Pass.plan()
+    local st, set, U, EP = Pass.read()
+    if not st then return nil end
+    local stars, spent = tonumber(st.Stars) or 0, tonumber(st.Spent) or 0
+    local unlock = st.TierUnlock or {}
+    local owned = st.Owned or {}
+    local open, huge, nextTier = {}, nil, nil
+    for tier, row in ipairs(set.Tiers) do
+        local need = tonumber(unlock[tier])
+        local isOpen = need ~= nil and need <= spent
+        if not isOpen and need and (not nextTier or need < nextTier.need) then nextTier = { tier = tier, need = need } end
+        for _, r in ipairs(row) do
+            if type(r) == "table" and r.Key and not owned[r.Key] and not Pass.flag(U, "ComingSoon", r) and not Pass.flag(U, "SoldOut", r) then
+                local c = { r = r, tier = tier, open = isOpen, cost = tonumber(r.Cost) or math.huge, key = r.Key }
+                if tostring(r.Key):lower():find("huge") or tostring(Pass.name(r)):find("Huge") then
+                    if not huge or c.tier < huge.tier then huge = c end
+                elseif isOpen then
+                    open[#open + 1] = c
+                end
+            end
+        end
+    end
+    table.sort(open, function(a, b) return a.cost < b.cost end)
+    local target, why
+    if huge and huge.open then
+        target, why = huge, "saving for the huge"
+    elseif huge then
+        target, why = open[1], ("opening tier %d for the huge (%d / %d spent)"):format(huge.tier, spent, tonumber(unlock[huge.tier]) or 0)
+    else
+        target, why = open[1], "clearing the rest of the pass"
+    end
+    return { st = st, EP = EP, stars = stars, spent = spent, huge = huge, target = target, why = why, nextTier = nextTier, buying = st.Buying, timer = st.Timer }
+end
+loop("eventpass", 15, function()
+    local p = Pass.plan()
+    if not p then return setStatus("eventpass", "No season pass running right now") end
+    if not p.buying then return setStatus("eventpass", "The pass shop is closed (" .. tostring(p.timer or "") .. ")") end
+    if not p.target then
+        if p.huge then
+            return setStatus("eventpass", ("Huge is in tier %d - nothing else open to spend on yet  ·  %d tokens"):format(p.huge.tier, p.stars))
+        end
+        return setStatus("eventpass", "Everything open is bought  ·  " .. tostring(p.timer or ""))
+    end
+    local t = p.target
+    if p.stars < t.cost then
+        return setStatus("eventpass", ("%s: %s needs %d tokens, you have %d"):format(p.why, Pass.name(t.r), t.cost, p.stars))
+    end
+    local ok, a, b = pcall(p.EP.Buy, t.key)
+    if ok and a then
+        UI.toast("SEASON PASS", "Bought " .. Pass.name(t.r), t == p.huge and THEME.gold or THEME.good)
+        setStatus("eventpass", ("Bought %s for %d tokens  ·  %s"):format(Pass.name(t.r), t.cost, p.why))
+        F.kick("eventpass")
+    else
+        setStatus("eventpass", "Buy refused: " .. tostring(ok and b or a))
+    end
+end)
+-- EVENT BOOSTS ---------------------------------------------------------------
+-- Keeps a Patch Coin, Pumpkin Damage and Island Luck boost running from your
+-- inventory. Only starts one when that kind has run out, best tier first, so
+-- nothing gets wasted on top of a boost that is still going.
+loop("eventboosts", 6, function()
+    local okB, PB = pcall(function() return require(RS.Library.Util.PumpkinTycoonBoosts) end)
+    local okC, CC = pcall(function() return require(RS.Library.Client.ConsumableCmds) end)
+    if not (okB and okC) then return setStatus("eventboosts", "Event boosts aren't in this game version") end
+    local boosts = (save() or {}).Boosts or {}
+    local function left(axis)
+        local best = 0
+        for _, id in ipairs(PB.IDS[axis] or {}) do
+            for _, b in pairs(boosts[id] or {}) do
+                if type(b) == "table" then best = math.max(best, tonumber(b.remaining) or 0) end
+            end
+        end
+        return best
+    end
+    local items = inventoryItems(true)
+    local used, parts = {}, {}
+    for _, axis in ipairs(PB.AXES) do
+        local name = PB.ITEMS[axis]
+        local remain = left(axis)
+        if remain < 20 then
+            local pick, pickTier
+            for _, it in pairs(items) do
+                if itemId(it) == name then
+                    local okT, tier = pcall(function() return it:GetTier() end)
+                    tier = okT and tonumber(tier) or 1
+                    if (tonumber(it:GetAmount()) or 0) > 0 and (not pickTier or tier > pickTier) then pick, pickTier = it, tier end
+                end
+            end
+            if pick then
+                local ok, a, b = pcall(CC.Consume, pick, 1)
+                if ok and a then
+                    used[#used + 1] = ("%s %s"):format(name, ({ "I", "II", "III" })[pickTier] or tostring(pickTier))
+                    remain = 1
+                else
+                    parts[#parts + 1] = name .. ": " .. tostring(ok and b or a)
+                end
+                task.wait(0.4)
+            else
+                parts[#parts + 1] = "no " .. name
+            end
+        end
+        if remain >= 20 then
+            parts[#parts + 1] = ("%s %dm"):format(axis, math.floor(remain / 60))
+        end
+    end
+    if #used > 0 then
+        UI.toast("BOOSTS", "Started " .. table.concat(used, ", "), THEME.good)
+        invAt = 0
+    end
+    setStatus("eventboosts", (#used > 0 and ("Started " .. table.concat(used, ", ") .. "  ·  ") or "") .. table.concat(parts, "  ·  "))
+end)
+-- TURKEY SIGHTINGS state
+local Turkey = {}
+env.__PS99HUB_TURKEY = Turkey
+-- TURKEY SIGHTINGS -----------------------------------------------------------
+-- A rare wild pet (huge or better) that wanders on your island for a short
+-- time. It's always worth an Ultra Net, so it gets one if you have any.
+loop("turkeysighting", 2, function()
+    local okT, Tk = pcall(function() return require(RS.Library.Client.PumpkinTycoonCmds.Turkey) end)
+    if not okT then return setStatus("turkeysighting", "Only works inside the Pumpkin Tycoon") end
+    local expires = Tk.Sighting()
+    if not expires then
+        Turkey.sightTries = 0
+        return setStatus("turkeysighting", "No sighting on your island right now" .. (Turkey.lastSight and ("  ·  last: " .. Turkey.lastSight) or ""))
+    end
+    local okU, cur = pcall(debug.getupvalue, Tk.Sighting, 1)
+    if not okU or type(cur) ~= "table" or typeof(cur.spot) ~= "Vector3" then
+        return setStatus("turkeysighting", "Sighting up, but its spot isn't readable")
+    end
+    local petId = type(cur.entry) == "table" and tostring(cur.entry.P) or "?"
+    local nets = { pet = 0, ultra = 0 }
+    for _, it in pairs(inventoryItems(true)) do
+        local id = itemId(it)
+        if id == "Pet Net" then nets.pet += tonumber(it:GetAmount()) or 0 end
+        if id == "Ultra Pet Net" then nets.ultra += tonumber(it:GetAmount()) or 0 end
+    end
+    local net = nets.ultra > 0 and "Ultra Pet Net" or (nets.pet > 0 and "Pet Net") or nil
+    if not net then return setStatus("turkeysighting", petId .. " is out - no nets left to throw") end
+    if (Turkey.sightTries or 0) >= 6 then return setStatus("turkeysighting", petId .. ": gave up after 6 throws") end
+    local result, why
+    withTeleport(function(root)
+        root.CFrame = CFrame.new(cur.spot + Vector3.new(0, 3, 0))
+        task.wait(0.5)
+        local ok, a, b = pcall(Tk.Throw, net)
+        result, why = ok and a, ok and b or a
+        task.wait(0.8)
+    end)
+    Turkey.sightTries = (Turkey.sightTries or 0) + 1
+    if result then
+        Turkey.lastSight = ("%s (%s, %s)"):format(petId, net, tostring(why or "thrown"))
+        UI.toast("SIGHTING", ("Threw a %s at %s"):format(net, petId), THEME.gold)
+        setStatus("turkeysighting", "Threw " .. net .. " at " .. petId)
+    else
+        setStatus("turkeysighting", ("%s: %s"):format(petId, tostring(why)))
     end
 end)
 -- AUTO RANK QUESTS -----------------------------------------------------------
@@ -3704,6 +4230,8 @@ do
         end
         return true
     end
+
+    Quest.bestZone, Quest.inBestWorld, Quest.parkInBestZone = bestZone, inBestWorld, parkInBestZone
 
     -- one action per quest type; returns the line shown under that quest
     local handlers = {}
@@ -4006,6 +4534,42 @@ do
         table.clear(Quest.enabledByQuest)
     end
 end
+-- AUTO AREA FARM -------------------------------------------------------------
+-- Buys every zone you can afford, stands you in your best (newest) area the
+-- way Auto Rank Quests does, and keeps Fast Farm working that whole area.
+-- Stays in the world you're in: it never travels between worlds.
+local AreaFarm = { enabledFarm = false }
+function AreaFarm.release()
+    S.areaFarmZone = nil
+    if AreaFarm.enabledFarm then
+        AreaFarm.enabledFarm = false
+        local h = UI.handles and UI.handles.farm
+        if h and h.get() then h.set(false, true) end
+    end
+end
+loop("areafarm", 1, function()
+    if inInstance() or not G.ZoneCmds then
+        S.areaFarmZone = nil
+        return setStatus("areafarm", "Main world only - on the event island use Tycoon Zone Farm")
+    end
+    local bought, why = F.buyNextZones("areafarm")
+    local z = Quest.bestZone and Quest.bestZone()
+    if not z then return setStatus("areafarm", "Couldn't read your best area yet") end
+    local name = tostring(z.ZoneName or z._id)
+    if not Quest.inBestWorld() then
+        S.areaFarmZone = nil
+        return setStatus("areafarm", ("Your best area (%s) is in world %s - go there and it takes over"):format(name, tostring(z.WorldNumber)))
+    end
+    S.areaFarmZone = name
+    local h = UI.handles and UI.handles.farm
+    if h and not h.get() then
+        AreaFarm.enabledFarm = true
+        h.set(true, true)
+    end
+    local parked = Quest.parkInBestZone()
+    local head = #bought > 0 and ("Bought " .. table.concat(bought, ", ") .. "  ·  ") or ""
+    setStatus("areafarm", ("%sFarming %s%s%s"):format(head, name, parked and "" or " (couldn't find its floor)", why and ("  ·  " .. why) or ""))
+end)
 -- AUTO PICKUP ----------------------------------------------------------------
 -- Coins, diamonds, lootbags and every other drop are "orbs" that the game's
 -- own magnet collects within Orb.DefaultPickupDistance (20) + Magnet. Pets
@@ -4046,6 +4610,312 @@ do
     end)
 end
 
+-- LAST AREA EGG ----------------------------------------------------------------
+-- Separate from Auto Hatch: waits until your island reaches its LAST area
+-- (Golden Ridge), then hatches only that area's egg - never any other egg.
+-- Same speed tricks as Auto Hatch (server-cooldown pacing, no animation).
+do
+    local running = false
+    local function lastEgg()
+        local plot, _, m = Tycoon.plot()
+        if not plot then return nil, "Join the Pumpkin Tycoon to use this" end
+        local zones = m.Types.ZONES
+        local last = zones[#zones]
+        local idx = Tycoon.bestZone()
+        if not idx or idx < #zones then
+            return nil, ("Waiting for the last area (%s)  ·  you're on area %s of %d"):format(tostring(last.DisplayName), tostring(idx or "?"), #zones)
+        end
+        local egg
+        pcall(function()
+            for _, e in pairs(G.CustomEggsCmds.All()) do if e._id == last.Egg then egg = e break end end
+        end)
+        if not egg then return nil, last.Egg .. " isn't loaded yet" end
+        return egg, last
+    end
+    function F.startLastHatch()
+        if running then return end
+        running = true
+        task.spawn(function()
+            local hatched = 0
+            while S.on.lasthatch and alive() do
+                if S.on.hatch then
+                    S.lastHatching = false
+                    setStatus("lasthatch", "Auto Hatch is on and already hatching - this waits")
+                    task.wait(1)
+                else
+                    local egg, info = lastEgg()
+                    if not egg then
+                        S.lastHatching = false
+                        setStatus("lasthatch", info)
+                        task.wait(2)
+                    else
+                        S.lastHatching = true
+                        local dir = egg._dir or dirGet("Eggs", egg._id)
+                        local max = egg._maxEggCount or select(2, pcall(G.EggCmds.GetMaxHatch, dir)) or 1
+                        local amount = tonumber(max) or 1
+                        local price = dir and (dir.overrideCost or dir.cost)
+                        if dir and dir.currency and type(price) == "number" and price > 0 then
+                            local okC, have = pcall(G.CurrencyCmds.Get, dir.currency)
+                            if okC and type(have) == "number" then amount = math.min(amount, math.floor(have / price)) end
+                        end
+                        amount = math.max(0, math.floor(amount / (S.lastShrink or 1)))
+                        if amount < 1 then
+                            setStatus("lasthatch", ("Saving Patch Coins for %s"):format(egg._id))
+                            task.wait(1)
+                        else
+                            local okD, cooldown = pcall(G.EggCmds.ComputeDebounce)
+                            cooldown = okD and tonumber(cooldown) or 2.5
+                            S.lastLead = S.lastLead or 0.35
+                            local readyAt = (S.lastHatchAt or 0) + cooldown - S.lastLead
+                            while os.clock() < readyAt and S.on.lasthatch do task.wait(0.02) end
+                            local tries, done = 0, false
+                            while not done and S.on.lasthatch and alive() do
+                                tries += 1
+                                if G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
+                                local sentAt = os.clock()
+                                local okH, success, err = pcall(G.Network.Invoke, "CustomEggs_Hatch", egg._uid, amount)
+                                if okH and success then
+                                    S.lastHatchAt = sentAt + (os.clock() - sentAt) / 2
+                                    S.lastShrink = 1
+                                    hatched += amount
+                                    S.eggs += amount
+                                    if tries == 1 then S.lastLead = math.min(cooldown * 0.9, S.lastLead + 0.04)
+                                    elseif tries > 4 then S.lastLead = math.max(0, S.lastLead - 0.04) end
+                                    setStatus("lasthatch", ("Hatching %s  ·  %d per hatch  ·  %s this session"):format(egg._id, amount, commas(hatched)))
+                                    done = true
+                                else
+                                    local raw = tostring(okH and (err or success) or success)
+                                    if raw:lower():find("enough") or raw:lower():find("coins") or raw:lower():find("afford") then
+                                        S.lastShrink = math.min((S.lastShrink or 1) * 2, 64)
+                                        done = true
+                                    elseif tries >= 70 then
+                                        setStatus("lasthatch", egg._id .. ": " .. raw:sub(1, 60))
+                                        done = true
+                                    else
+                                        task.wait(0.06)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            S.lastHatching = false
+            if not S.on.hatch then pcall(function() G.Variables.OpeningEgg = 0 end) end
+            running = false
+        end)
+    end
+end
+
+-- TYCOON REBIRTH -------------------------------------------------------------------
+-- Rebirths the island when it's 100% built, but only while a rebirth still
+-- raises Huge or Titanic odds (the game says "maxed" once it doesn't).
+local TycoonRebirth = {}
+do
+    local function mods()
+        local ok, m = pcall(function()
+            return {
+                R = require(RS.Library.Client.PumpkinTycoonCmds.Rebirth),
+                PT = require(RS.Library.Types.PumpkinTycoon),
+                PTB = require(RS.Library.Util.PumpkinTycoonButtons),
+                B = require(RS.Library.Types.PumpkinTycoon.Buttons),
+            }
+        end)
+        return ok and m or nil
+    end
+    -- what the next rebirth gives, straight from the game's own texts
+    function TycoonRebirth.info()
+        local plot = Tycoon.plot()
+        local m = mods()
+        if not (plot and m) then return nil end
+        local n = select(2, pcall(m.R.Rebirths, plot)) or 0
+        local okR, rows = pcall(m.R.RowTexts, n)
+        local state
+        pcall(function() state = plot:Save(m.PT.VAR.Buttons) end)
+        local okP, have, need, frac = pcall(m.PTB.RebirthProgress, state)
+        local huge = okR and rows.huge or "?"
+        local titanic = okR and rows.titanic or "?"
+        local maxed = tostring(huge):find("maxed") ~= nil and tostring(titanic):find("maxed") ~= nil
+        return {
+            rebirths = n, rows = okR and rows or {}, maxed = maxed,
+            ready = select(2, pcall(m.PTB.RebirthReady, state)) == true,
+            progress = okP and frac or 0, have = okP and have or 0, need = okP and need or 0,
+            plot = plot, m = m,
+        }
+    end
+    loop("tycoonrebirth", 3, function()
+        local info = TycoonRebirth.info()
+        if not info then return setStatus("tycoonrebirth", "Join the Pumpkin Tycoon to use this") end
+        if info.maxed then
+            return setStatus("tycoonrebirth", ("Huge and Titanic odds are maxed at rebirth %d  ·  not rebirthing"):format(info.rebirths))
+        end
+        if not info.ready then
+            return setStatus("tycoonrebirth", ("Island %d%% built (%d/%d)  ·  rebirths at 100%%"):format(math.floor(info.progress * 100), info.have, info.need))
+        end
+        local plot, m = info.plot, info.m
+        local function try() return pcall(function() return plot:Invoke(m.B.VERB_REBIRTH) end) end
+        local okC, ok, reason = try()
+        if not (okC and ok) then
+            -- some servers want you at the rebirth shrine: hop there and back
+            local _, model = Tycoon.plot()
+            local shrine = model and model:FindFirstChild(m.PT.REBIRTH_SHRINE, true)
+            if shrine then
+                withTeleport(function(root)
+                    local pos = shrine:GetPivot().Position
+                    root.CFrame = CFrame.new(pos + Vector3.new(0, 4, 8), pos)
+                    task.wait(0.8)
+                    okC, ok, reason = try()
+                end)
+            end
+        end
+        if okC and ok then
+            UI.toast("TYCOON REBIRTH", ("Rebirth %d done - next: %s"):format(info.rebirths + 1, tostring(info.rows.huge)), THEME.gold)
+            setStatus("tycoonrebirth", ("Rebirthed to %d"):format(info.rebirths + 1))
+            -- the island starts over: farm and pets go back to the first area
+            Tycoon.retarget = true
+            Tycoon.moveToNewArea = true
+        else
+            setStatus("tycoonrebirth", "Rebirth refused: " .. tostring(reason or ok))
+        end
+    end)
+end
+
+-- AFK SAVER --------------------------------------------------------------------
+-- While the hub is hidden: 3D rendering off and an FPS cap, so a long AFK
+-- farm barely touches your GPU/CPU. Everything comes back when you open
+-- the hub, turn this off or unload.
+do
+    local RunS = game:GetService("RunService")
+    local applied = false
+    local function apply(on)
+        if on == applied then return end
+        applied = on
+        pcall(function() RunS:Set3dRenderingEnabled(not on) end)
+        pcall(function() setfpscap(on and (tonumber(Settings.values.afkFps) or 15) or 240) end)
+    end
+    F.afkApply = apply
+    task.spawn(function()
+        while alive() do
+            local want = S.on.afksaver and not UI.win.Visible
+            apply(want == true)
+            if applied then setStatus("afksaver", ("Saving power  ·  3D off, %d fps cap  ·  open the hub to see the game"):format(tonumber(Settings.values.afkFps) or 15))
+            elseif S.on.afksaver then setStatus("afksaver", "Kicks in when you hide the hub") end
+            task.wait(0.5)
+        end
+        apply(false)
+    end)
+end
+
+-- AUTO REJOIN ------------------------------------------------------------------
+-- When Roblox shows a disconnect / kick error, rejoin the same game and run
+-- the hub again (queued through the executor, read from its workspace file).
+do
+    local GuiService = game:GetService("GuiService")
+    local TeleportService = game:GetService("TeleportService")
+    local rejoining = false
+    local function rejoin(reason)
+        if rejoining or not S.on.autorejoin then return end
+        rejoining = true
+        setStatus("autorejoin", "Disconnected (" .. tostring(reason):sub(1, 40) .. ")  ·  rejoining...")
+        pcall(function()
+            local q = queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport)
+            if q then q('repeat task.wait() until game:IsLoaded() task.wait(5) pcall(function() loadstring(readfile("ps99_hub.luau"))() end)') end
+        end)
+        task.wait(3)
+        for _ = 1, 10 do
+            pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+            task.wait(8)
+        end
+        rejoining = false
+    end
+    -- some executor threads can't listen to GuiService; fall back to watching
+    -- the disconnect prompt itself
+    local hooked = pcall(function()
+        GuiService.ErrorMessageChanged:Connect(function(msg)
+            if msg and msg ~= "" then task.spawn(rejoin, msg) end
+        end)
+    end)
+    if not hooked then
+        task.spawn(function()
+            while alive() do
+                local ok, msg = pcall(function()
+                    local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
+                    local prompt = overlay:FindFirstChild("ErrorPrompt")
+                    if not prompt then return nil end
+                    local label = prompt:FindFirstChild("ErrorMessage", true)
+                    return label and label.Text or "disconnected"
+                end)
+                if ok and msg then rejoin(msg) end
+                task.wait(2)
+            end
+        end)
+    end
+    task.spawn(function()
+        while alive() do
+            if S.on.autorejoin and not rejoining then setStatus("autorejoin", "Watching for disconnects") end
+            task.wait(5)
+        end
+    end)
+end
+
+-- DISCORD SESSION REPORT -----------------------------------------------------------
+-- Every N minutes, post a summary of the session to your webhook.
+do
+    local startDiamonds, startCoins, startT = nil, nil, os.clock()
+    local function report()
+        local url = Webhook.url and Webhook.url()
+        if not url then return false, "no webhook set" end
+        local sv = save()
+        local gems = diamonds()
+        startDiamonds = startDiamonds or gems
+        local mins = math.max(1, math.floor((os.clock() - startT) / 60))
+        local fields = {
+            { name = "Session", value = ("%dh %02dm"):format(mins // 60, mins % 60), inline = true },
+            { name = "Eggs hatched", value = ("%s  (lifetime %s)"):format(commas(S.eggs), commas(sv.EggsHatched or 0)), inline = true },
+            { name = "Huges", value = tostring(Tracker.huges), inline = true },
+            { name = "Diamonds", value = ("%s  (%s%s)"):format(short(gems), gems >= startDiamonds and "+" or "-", short(math.abs(gems - startDiamonds))), inline = true },
+            { name = "Rank", value = ("%s  ·  %s stars"):format(tostring(sv.Rank), tostring(sv.RankStars)), inline = true },
+        }
+        local quests = {}
+        for _, p in ipairs(Quest.plans or {}) do quests[#quests + 1] = ("%s: %s/%s"):format(p.title, commas(p.progress), commas(p.amount)) end
+        if #quests > 0 then fields[#fields + 1] = { name = "Rank quests", value = table.concat(quests, "\n"):sub(1, 1000), inline = false } end
+        local plot, _, m = Tycoon.plot()
+        if plot then
+            local coins = Tycoon.coins(m)
+            startCoins = startCoins or coins
+            fields[#fields + 1] = { name = "Tycoon", value = ("%s coins  ·  %d bought  ·  wild caught %d"):format(short(coins), S.counts.tycoon, WildStats.caught), inline = false }
+        end
+        local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request
+        if not httpRequest then return false, "no http request function" end
+        local body = { username = "PS99 Hub", embeds = { {
+            title = "Session report", description = ("**%s** is still farming"):format(LocalPlayer.Name),
+            color = 0xFF96BE, fields = fields, footer = { text = "PS99 Hub" }, timestamp = DateTime.now():ToIsoDate(),
+        } }, allowed_mentions = { parse = {} } }
+        local ok, res = pcall(httpRequest, { Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = HttpService:JSONEncode(body) })
+        local code = ok and type(res) == "table" and tonumber(res.StatusCode) or 0
+        return code >= 200 and code < 300, ok and ("Discord answered " .. tostring(code)) or tostring(res)
+    end
+    F.sendReport = report
+    local lastSent = os.clock()
+    task.spawn(function()
+        while alive() do
+            local every = (tonumber(Settings.values.reportMinutes) or 60) * 60
+            if S.on.webhookreport then
+                if os.clock() - lastSent >= every then
+                    lastSent = os.clock()
+                    local ok, err = report()
+                    setStatus("webhookreport", ok and ("Report sent  ·  next in %d min"):format(every // 60) or ("Report failed: " .. tostring(err)))
+                else
+                    setStatus("webhookreport", ("Next report in %d min"):format(math.ceil((every - (os.clock() - lastSent)) / 60)))
+                end
+            else
+                lastSent = os.clock()
+            end
+            task.wait(5)
+        end
+    end)
+end
+
 -- PANIC ------------------------------------------------------------------
 function F.stopAll()
     local n = 0
@@ -4070,21 +4940,33 @@ do
     local pinnedTab = UI.tab("Pinned", 0)
     UI.pinnedTab = pinnedTab
     local farm = UI.tab("Farm", 1)
-    local s = UI.section(farm, "Hatching", THEME.gold)
+    local hatchTab = UI.tab("Hatch", 2)
+    local eventTab = UI.tab("Event", 3)
+    local catchTab = UI.tab("Catching", 4)
+    local s = UI.section(hatchTab, "Hatching", THEME.gold)
     UI.toggle(s, "hatch", "Auto Hatch", "Hatches the nearest egg at max amount, no animation", false, function(on) if on then F.startHatch() end end)
     UI.status(s, "hatch", "Off")
+    UI.toggle(s, "lasthatch", "Hatch Last Area Egg Only", "Event island: waits for your last area, then hatches only that egg (separate from Auto Hatch)", false, function(on)
+        if on then F.startLastHatch() end
+    end)
+    UI.status(s, "lasthatch", "Off")
     s = UI.section(farm, "Farming", THEME.good)
+    UI.toggle(s, "fastpets", "Fast Pets", "Pets move x200 faster everywhere - main world, event, any area", true)
     UI.toggle(s, "autopickup", "Auto Pickup Everything", "Coins, diamonds, lootbags and all drops, from far away", true)
     UI.status(s, "autopickup", "Off")
     UI.slider(s, "pickupRange", "Pickup range (studs)", 40, 600, 250, 10)
     UI.toggle(s, "instantpickup", "Instant Pickup", "Lootbags and coins fly to you the moment they drop (no 2s wait)", true)
     UI.toggle(s, "farm", "Fast Farm", "Pets break everything within 100 studs, orbs and lootbags collected", false, function(on) if on then F.startFarm() end end)
     UI.status(s, "farm", "Off")
+    UI.toggle(s, "areafarm", "Auto Area Farm", "Buys every zone you can afford, moves you into your best area and farms all of it (this world only)", false, function(on)
+        if on then F.kick("areafarm") else AreaFarm.release() end
+    end)
+    UI.status(s, "areafarm", "Off")
     UI.toggle(s, "ultimate", "Auto Ultimate", "Fires your equipped ultimate whenever it is charged in a zone", false)
     UI.status(s, "ultimate", "Off")
     UI.toggle(s, "equipbest", "Auto Equip Best", "Re-equips your strongest pets every 30 seconds", false)
     UI.status(s, "equipbest", "Off")
-    s = UI.section(farm, "Pumpkin Tycoon", Color3.fromRGB(255, 150, 70))
+    s = UI.section(eventTab, "Pumpkin Tycoon", Color3.fromRGB(255, 150, 70))
     UI.toggle(s, "tycoon", "Auto Buy Tycoon", "Buys the cheapest affordable button first, all the way through", false, function(on)
         if on and Tycoon.plot() and UI.handles.tycoonfarm then UI.handles.tycoonfarm.set(true, true) end
     end)
@@ -4095,13 +4977,65 @@ do
     UI.status(s, "tycoonfarm", "Off")
     UI.toggle(s, "tycoonupgrades", "Auto Token Upgrades", "Spends Pumpkin Tokens: Faster Spawns first, then coins and spawn luck", false)
     UI.status(s, "tycoonupgrades", "Off")
+    UI.toggle(s, "tycoonrebirth", "Auto Rebirth Tycoon", "Rebirths at 100% only while Huge / Titanic odds still go up", false)
+    UI.status(s, "tycoonrebirth", "Off")
+    do
+        -- live "next rebirth gives" panel under the switch
+        s.n += 1
+        local panel = UI.new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.55, ZIndex = 4 }, s.frame)
+        UI.corner(panel, 10)
+        UI.glassAdd(panel)
+        UI.pad(panel, 16, 12, 8, 8)
+        UI.new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, panel)
+        local head = UI.label(panel, { text = "NEXT REBIRTH", font = Enum.Font.GothamBold, size = 11, colour = THEME.gold, sz = UDim2.new(1, 0, 0, 16), z = 5 })
+        head.LayoutOrder = 0
+        local ORDER = { { "huge", "Huge Luck" }, { "titanic", "Titanic Luck" }, { "coins", "Patch Coins" }, { "net", "Pet Net Luck" }, { "turkey", "Turkey Damage" }, { "gift", "Flannel Gifts" } }
+        local lines = {}
+        for i, row in ipairs(ORDER) do
+            local l = UI.label(panel, { text = "", size = 11, sz = UDim2.new(1, 0, 0, 15), z = 5, rich = true })
+            l.LayoutOrder = i
+            lines[row[1]] = l
+        end
+        task.spawn(function()
+            while alive() do
+                if eventTab.page.Visible and UI.win.Visible then
+                    local info = TycoonRebirth.info()
+                    if info then
+                        head.Text = ("NEXT REBIRTH  ·  you're on rebirth %d%s"):format(info.rebirths, info.maxed and "  ·  Huge/Titanic maxed" or "")
+                        for _, row in ipairs(ORDER) do
+                            local text = info.rows[row[1]] or "-"
+                            local colour = tostring(text):find("maxed") and "#9a8a94" or ((row[1] == "huge" or row[1] == "titanic") and "#ffd33d" or "#ffeef4")
+                            lines[row[1]].Text = ('<font color="#cea0b6">%s:</font>  <font color="%s">%s</font>'):format(row[2], colour, tostring(text))
+                        end
+                    else
+                        head.Text = "NEXT REBIRTH  ·  join the Pumpkin Tycoon to see it"
+                        for _, l in pairs(lines) do l.Text = "" end
+                    end
+                end
+                task.wait(3)
+            end
+        end)
+    end
 
+    s = UI.section(eventTab, "Event boosts & loot", THEME.good)
     UI.toggle(s, "cocoa", "Auto Hot Cocoa", "Keeps the coins, damage and luck cocoa boosts topped up", false)
     UI.status(s, "cocoa", "Off")
     UI.slider(s, "cocoaMinutes", "Cocoa minutes per top-up", 10, 120, 30, 10)
-    s = UI.section(farm, "Tycoon wild pets", Color3.fromRGB(255, 170, 90))
-    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Huges first, then the lowest catch-chance (rarest) pets; chains nearby throws", false)
+    UI.toggle(s, "eventboosts", "Auto Event Boosts", "Starts a Patch Coin / Damage / Island Luck boost from your bag when one runs out, best tier first", false)
+    UI.status(s, "eventboosts", "Off")
+    UI.toggle(s, "eventlootbox", "Auto Open Flannel Gifts", "The event's own lootbox (Patch Coins and boosts) - separate from Auto Open Lootboxes", false)
+    UI.status(s, "eventlootbox", "Off")
+    s = UI.section(eventTab, "Season pass", THEME.gold)
+    UI.toggle(s, "eventpass", "Auto Season Pass", "Spends Season Tokens: opens the huge's tier, saves for the huge, then buys the rest", false)
+    UI.status(s, "eventpass", "Off")
+    s = UI.section(catchTab, "Turkey sightings", Color3.fromRGB(230, 120, 70))
+    UI.toggle(s, "turkeysighting", "Auto Catch Turkey Sightings", "Throws a net at the rare huge+ sighting on your island (Ultra first)", false)
+    UI.status(s, "turkeysighting", "Off")
+    s = UI.section(catchTab, "Tycoon wild pets", Color3.fromRGB(255, 170, 90))
+    UI.toggle(s, "wildcatch", "Auto Catch Wild Pets", "Scans every spawn; huges first, then only the rarest pets under your limit", false)
     UI.status(s, "wildcatch", "Off")
+    UI.slider(s, "wildMax", "Only pets with catch chance at or below (%)", 5, 100, 30, 5)
     UI.toggle(s, "wildultrahuge", "Ultra Nets On Huges", "Ultra nets (x5) are used on huges and above only, never on normal pets", true)
     UI.toggle(s, "wildnew", "Prefer Pets Not Caught Yet", "Breaks ties toward pets missing from your collection", true)
     UI.toggle(s, "tycoonautonets", "Auto Buy Nets", "Turns on the tycoon's own net restock (uses Patch Coins)", false, function(on)
@@ -4116,7 +5050,7 @@ do
     UI.status(s, "tycoonautonets", "Off")
 
     -- EGGS: live chances + rare hatch log ---------------------------------
-    local eggsTab = UI.tab("Eggs", 2)
+    local eggsTab = hatchTab
     s = UI.section(eggsTab, "Egg chances", THEME.gold)
     do
         local new, corner, stroke, label = UI.new, UI.corner, UI.stroke, UI.label
@@ -4333,6 +5267,13 @@ do
     UI.textbox(s, "webhookUrl", "Webhook URL", "https://discord.com/api/webhooks/...", true)
     UI.toggle(s, "webhookping", "Ping Me", "Pings only the Discord user ID below", false)
     UI.textbox(s, "webhookPingId", "Your Discord user ID", "e.g. 123456789012345678 (Developer Mode > Copy User ID)", false)
+    UI.toggle(s, "webhookreport", "Session Reports", "Posts eggs, huges, diamonds, quests and tycoon stats every N minutes", false)
+    UI.status(s, "webhookreport", "Off")
+    UI.slider(s, "reportMinutes", "Report every (minutes)", 10, 240, 60, 10)
+    UI.button(s, "Send a session report now", function()
+        local ok, err = F.sendReport()
+        UI.toast("SESSION REPORT", ok and "Sent - check your channel" or ("Failed: " .. tostring(err)), ok and THEME.good or THEME.bad)
+    end)
     UI.button(s, "Send test message", function()
         if not Webhook.url() then
             UI.toast("WEBHOOK", "Paste a Discord webhook URL first", THEME.bad)
@@ -4364,7 +5305,7 @@ do
     end
 
     -- QUESTS: rank quests with live progress and what the solver is doing
-    local questTab = UI.tab("Quests", 3)
+    local questTab = UI.tab("Quests", 5)
     s = UI.section(questTab, "Rank quests", THEME.gold)
     UI.toggle(s, "autoquest", "Auto Rank Quests", "Works out each rank quest and finishes it the fastest way it can", false, function(on)
         if not on then Quest.release() end
@@ -4436,7 +5377,7 @@ do
         end)
     end
 
-    local rewards = UI.tab("Rewards", 4)
+    local rewards = UI.tab("Rewards", 6)
     s = UI.section(rewards, "Daily claims", THEME.gold)
     UI.toggle(s, "freegifts", "Auto Free Gifts", "Claims each play-time gift the moment it unlocks", true)
     UI.status(s, "freegifts", "")
@@ -4472,7 +5413,7 @@ do
     UI.status(s, "vending", "")
     UI.toggle(s, "vendingdiamonds", "Include Diamond Machines", "Rare potion / enchant machines that cost diamonds", false)
 
-    local items = UI.tab("Items", 5)
+    local items = UI.tab("Items", 7)
     s = UI.section(items, "Boosts", THEME.good)
     UI.toggle(s, "potions", "Auto Potions", "Keeps one of every potion type running, best tier first", false)
     UI.status(s, "potions", "")
@@ -4497,14 +5438,14 @@ do
     UI.toggle(s, "tnt", "Auto TNT", nil, false)
     UI.status(s, "tnt", "")
 
-    local pets = UI.tab("Pets", 6)
+    local pets = UI.tab("Pets", 8)
     s = UI.section(pets, "Machines", THEME.gold)
     UI.toggle(s, "golden", "Auto Golden", "Turns every 10 of a normal pet into a golden one (skips huges)", false)
     UI.status(s, "golden", "")
     UI.toggle(s, "rainbow", "Auto Rainbow", "Turns every 10 goldens into a rainbow (skips huges)", false)
     UI.status(s, "rainbow", "")
 
-    local progress = UI.tab("Progress", 7)
+    local progress = UI.tab("Progress", 9)
     s = UI.section(progress, "Unlocks", THEME.good)
     UI.toggle(s, "zones", "Auto Buy Next Zone", "Buys the next zone in this world as soon as you can afford it", false)
     UI.status(s, "zones", "")
@@ -4518,8 +5459,13 @@ do
     UI.status(s, "eggslots", "")
     UI.slider(s, "slotReserve", "Keep at least (million diamonds)", 0, 50, 2, 1)
 
-    local misc = UI.tab("Misc", 8)
+    local misc = UI.tab("Misc", 10)
     s = UI.section(misc, "Player", Color3.fromRGB(140, 210, 255))
+    UI.toggle(s, "afksaver", "AFK Saver", "While the hub is hidden: 3D rendering off + FPS cap (saves GPU on long farms)", false)
+    UI.status(s, "afksaver", "Off")
+    UI.slider(s, "afkFps", "AFK Saver FPS cap", 5, 60, 15, 5)
+    UI.toggle(s, "autorejoin", "Auto Rejoin", "Rejoins and re-runs the hub if you get disconnected or kicked", false)
+    UI.status(s, "autorejoin", "Off")
     UI.toggle(s, "antiafk", "Anti AFK", "Presses Space every few minutes, like the Pet Dimensions hub", true)
     UI.status(s, "antiafk", "")
     UI.slider(s, "afkMinutes", "Anti AFK every (minutes)", 1, 15, 1, 1)
@@ -4821,6 +5767,7 @@ end)
 
 env.__PS99HUB_CLEANUP = function()
     S.alive = false
+    pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(true) end)
     pcall(function() require(RS.Library.Client.OrbCmds.Orb).DefaultPickupDistance = 20 end)
     pcall(function()
         if env.__PS99HUB_ORB_NEW then
