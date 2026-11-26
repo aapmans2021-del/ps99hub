@@ -4725,7 +4725,8 @@ loop("turkeyboss", 0.5, function()
         return setStatus("turkeyboss", left and ("Next turkey in %d:%02d"):format(left // 60, math.floor(left % 60)) or "Waiting for the turkey")
     end
     -- the cannon already refused for this turkey: don't hold everything up
-    if EventFocus.failedTurkey == t.Name then
+    -- (retries every 20s so one bad launch doesn't skip the whole turkey)
+    if EventFocus.failedTurkey == t.Name and os.clock() - (EventFocus.failedAt or 0) < 20 then
         S.turkeyFight = false
         return
     end
@@ -4739,11 +4740,24 @@ loop("turkeyboss", 0.5, function()
     if not root then return end
     local back = Tycoon.spot or root.CFrame
     if (root.Position - pos).Magnitude > 250 then
-        -- your island's cannon (target "centre") flies you to the arena
-        local pad
+        -- straight teleport into the arena
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.CFrame = CFrame.new(pos + Vector3.new(0, 5, 24), pos)
+        task.wait(1)
+    end
+    if hrp() and (hrp().Position - pos).Magnitude > 250 then
+        -- teleport got pulled back: your island's cannon (target "centre") flies you there instead
+        root = hrp()
+        -- there can be more than one "centre" pad (the zone 8 one stays unbuilt
+        -- until you buy it): only a built one launches
+        local pad, fallback
         for _, d in ipairs(myModel:GetDescendants()) do
-            if d.Name == "CannonPad" and d:IsA("BasePart") and d:GetAttribute("Target") == "centre" then pad = d break end
+            if d.Name == "CannonPad" and d:IsA("BasePart") and d:GetAttribute("Target") == "centre" then
+                if d:GetAttribute("TurkeyCannonBuilt") ~= false then pad = d break end
+                fallback = fallback or d
+            end
         end
+        pad = pad or fallback
         if pad then
             root.AssemblyLinearVelocity = Vector3.zero
             root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
@@ -4756,6 +4770,7 @@ loop("turkeyboss", 0.5, function()
             local why = (ok and type(b) == "string" and b) or (not ok and tostring(a)) or nil
             S.turkeyFight = false
             EventFocus.failedTurkey = t.Name
+            EventFocus.failedAt = os.clock()
             EventFocus.goBack(back)
             return setStatus("turkeyboss", "Cannon didn't launch: " .. tostring(why or "build the island's cannon (Zone8_Cannon button) first"))
         end
