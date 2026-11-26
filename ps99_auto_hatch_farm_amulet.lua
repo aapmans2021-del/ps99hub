@@ -1516,7 +1516,6 @@ do
         end)
         UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
     end
-
     -- floating open button
     local openBtn = new("TextButton", { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -18, 1, -18), Size = UDim2.fromOffset(56, 56),
         BackgroundColor3 = Color3.fromRGB(214, 52, 58), Text = "99", Font = Enum.Font.GothamBlack, TextSize = 18,
@@ -1968,8 +1967,10 @@ do
         return math.max(0, math.floor(amount / S.shrink))
     end
     F.nearestEgg = nearestEgg
-    RunService.Heartbeat:Connect(function()
-        if (S.on.hatch or S.lastHatching) and alive() and G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
+    local skipConn
+    skipConn = RunService.Heartbeat:Connect(function()
+        if not alive() then skipConn:Disconnect() return end
+        if (S.on.hatch or S.lastHatching) and G.Variables.OpeningEgg < 1 then G.Variables.OpeningEgg = 1 end
     end)
     local running = false
     local inFlight = 0
@@ -2878,6 +2879,112 @@ loop("machines", 15, function()
     setStatus("machines", ("%d claimed this session"):format(S.counts.machines))
 end)
 
+-- FREE BUTTON MACHINES -------------------------------------------------------
+-- Comet Shower (once a day) and Area Surge (every 15 minutes) are free
+-- buttons that only answer when you stand on them; hop on and come back,
+-- like the timed reward machines. Each lives in one world: elsewhere the
+-- status just says where it is.
+function F.findMachine(name)
+    local okM, models = pcall(function() return require(RS.Library.Client.MachineCmds).GetModels(name) end)
+    if okM and type(models) == "table" then
+        for _, m in pairs(models) do
+            if typeof(m) == "Instance" and m.Parent then return m end
+        end
+    end
+    local map = workspace:FindFirstChild("Map")
+    for _, d in ipairs(map and map:GetDescendants() or {}) do
+        if d:IsA("Model") and d.Name == name and d.Parent and d.Parent.Name == "Machines" then return d end
+    end
+    return nil
+end
+function F.useMachine(key, machineName, remote, stampField, label)
+    if inInstance() then return setStatus(key, label .. " is in the main world") end
+    local stamp = tonumber((save() or {})[stampField])
+    local left = stamp and (stamp - workspace:GetServerTimeNow()) or 0
+    if left > 0 then
+        return setStatus(key, ("Next %s in %s"):format(label, left >= 3600 and ("%dh %02dm"):format(left // 3600, (left % 3600) // 60) or ("%dm %02ds"):format(left // 60, math.floor(left % 60))))
+    end
+    -- the server says which world it's in when you're somewhere else
+    local ok, msg = invoke(remote)
+    if ok then
+        UI.toast(label:upper(), "Started", THEME.good)
+        return setStatus(key, label .. " started")
+    end
+    msg = tostring(msg)
+    if not msg:lower():find("far") then return setStatus(key, msg) end
+    local m = F.findMachine(machineName)
+    local pad = m and (m:FindFirstChild("Pad") or m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
+    if not pad then return setStatus(key, "Can't find the " .. label .. " machine in this world") end
+    local result
+    withTeleport(function(root)
+        root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0))
+        task.wait(0.6)
+        result = table.pack(invoke(remote))
+    end)
+    if result and result[1] then
+        UI.toast(label:upper(), "Started", THEME.good)
+        setStatus(key, label .. " started")
+    else
+        setStatus(key, label .. ": " .. tostring(result and result[2] or "busy - retrying"))
+    end
+end
+loop("cometshower", 30, function()
+    F.useMachine("cometshower", "CometShower", "CometShower_Activate", "CometShowerTimestamp", "Comet Shower")
+end)
+loop("areasurge", 20, function()
+    F.useMachine("areasurge", "ZoneSurges", "Zone Surges: Activate", "ZoneSurgesTimestamp", "Area Surge")
+end)
+
+-- ITEM CREATOR ---------------------------------------------------------------
+-- Pick an item from the machine's pool (15k diamonds), finish the quest it
+-- gives (Auto Rank Quests works on it too) and claim the item. Picks huge
+-- potions first.
+local ITEM_CREATOR_PICK = { "Huge", "Daycare Slot Voucher", "Bucket O' Magic", "Magic Shard", "Mini Chest", "Mini Pinata", "Gift Bag" }
+loop("itemcreator", 3, function()
+    local st = (save() or {}).ItemCreator
+    if type(st) ~= "table" then return setStatus("itemcreator", "The Item Creator isn't unlocked yet") end
+    if st.Goal and st.GoalCompleted then
+        local ok, msg = invoke("Item Creator: Claim")
+        if ok then
+            S.counts.itemcreator = (S.counts.itemcreator or 0) + 1
+            UI.toast("ITEM CREATOR", "Item claimed", THEME.gold)
+            return setStatus("itemcreator", ("Claimed  ·  %d this session"):format(S.counts.itemcreator))
+        end
+        return setStatus("itemcreator", "Claim refused: " .. tostring(msg))
+    end
+    if st.Goal then
+        local g = st.Goal
+        local okT, ttl = pcall(function() return require(RS.Library.Client.QuestCmds).MakeTitle(g, true) end)
+        return setStatus("itemcreator", ("Quest: %s  ·  %s / %s%s"):format(okT and ttl or ("type " .. tostring(g.Type)), commas(g.Progress or 0), commas(g.Amount or 0),
+            S.on.autoquest and "" or "  ·  turn on Auto Rank Quests to finish it for you"))
+    end
+    if type(st.ItemPool) ~= "table" then return setStatus("itemcreator", "Waiting for the machine") end
+    if not S.on.itemcreatorpick then return setStatus("itemcreator", "Pick an item yourself, or turn on Auto Pick below") end
+    local cost = 15000
+    pcall(function() cost = require(RS.Library.Balancing).Constants.ItemCreatorCost or cost end)
+    local keep = tonumber(Settings.values.itemCreatorKeep) or 100000
+    if diamonds() < cost + keep then
+        return setStatus("itemcreator", ("Needs %s diamonds (keeping %s)"):format(short(cost), short(keep)))
+    end
+    local bestIndex, bestRank, bestName
+    for i, entry in ipairs(st.ItemPool) do
+        local id = type(entry) == "table" and type(entry.data) == "table" and entry.data.id
+        local rank = id and table.find(ITEM_CREATOR_PICK, id) or (#ITEM_CREATOR_PICK + 1)
+        if not bestRank or rank < bestRank then
+            bestIndex, bestRank = i, rank
+            bestName = ("%sx %s"):format(tostring(entry.data and entry.data._am or 1), tostring(id))
+        end
+    end
+    if not bestIndex then return setStatus("itemcreator", "Nothing in the pool") end
+    local ok, msg = invoke("Item Creator: Select", bestIndex)
+    if ok then
+        UI.toast("ITEM CREATOR", "Picked " .. bestName, THEME.good)
+        setStatus("itemcreator", "Picked " .. bestName .. " - its quest is next")
+    else
+        setStatus("itemcreator", "Pick refused: " .. tostring(msg))
+    end
+end)
+
 -- balloon gifts: slingshot from below, then stand on the gift
 loop("balloons", 6, function()
     if inInstance() then return setStatus("balloons", "Balloons float over the main world") end
@@ -3720,7 +3827,113 @@ loop("spinwheel", 6, function()
     end
     spinSome()
     if spun == 0 and pad then withTeleport(function(root) root.CFrame = CFrame.new(pad.Position + Vector3.new(0, 4, 0)) task.wait(0.8) spinSome() end) end
-    setStatus("spinwheel", spun > 0 and ("Spun %d times  ·  %d tickets left"):format(spun, tickets - spun) or ("Can't spin: " .. tostring(msg)))
+    -- the world wheels (Tech / Void / Fantasy) take their own tickets; the
+    -- server says so when you're in the wrong world, which costs nothing
+    local extra = {}
+    if S.on.spinwheelworlds then
+        for _, w in ipairs({ { "TechWheel", "Tech Spinny Wheel Ticket" }, { "VoidWheel", "Void Spinny Wheel Ticket" }, { "FantasyWheel", "Fantasy Spinny Wheel Ticket" } }) do
+            local n = itemCount(w[2])
+            for _ = 1, math.min(3, n) do
+                local ok = invoke("Spinny Wheel: Request Spin", w[1])
+                if not ok then break end
+                extra[#extra + 1] = w[1]
+                task.wait(5.5)
+            end
+        end
+    end
+    setStatus("spinwheel", (spun > 0 and ("Spun %d times  ·  %d tickets left"):format(spun, tickets - spun) or ("Can't spin: " .. tostring(msg)))
+        .. (#extra > 0 and ("  ·  %d world-wheel spins"):format(#extra) or ""))
+end)
+
+-- FREE WHEEL TICKETS ---------------------------------------------------------
+-- Every spinny wheel hands out a free ticket every couple of days. The
+-- request works from anywhere (checked live: Tech, Void and Fantasy wheels).
+loop("wheeltickets", 120, function()
+    local okD, wheels = pcall(function() return G.Directory.SpinnyWheels end)
+    if not okD or type(wheels) ~= "table" then return setStatus("wheeltickets", "No spinny wheels found") end
+    local cds = (save() or {}).SpinnyWheelCooldowns or {}
+    local now = workspace:GetServerTimeNow()
+    local asked, soonest = {}, nil
+    for id, d in pairs(wheels) do
+        if type(d) == "table" and not d.Subtitle then
+            local cd = tonumber(cds[id])
+            if not cd or cd <= now then
+                fire("Spinny Wheel: Request Ticket", id)
+                asked[#asked + 1] = (tostring(id):gsub("Wheel$", ""))
+            elseif not soonest or cd < soonest then
+                soonest = cd
+            end
+        end
+    end
+    local nextTxt = soonest and ("next in %dh %02dm"):format((soonest - now) // 3600, ((soonest - now) % 3600) // 60) or ""
+    if #asked > 0 then
+        setStatus("wheeltickets", "Asked for free tickets: " .. table.concat(asked, ", ") .. (nextTxt ~= "" and ("  ·  " .. nextTxt) or ""))
+    else
+        setStatus("wheeltickets", "All free tickets claimed  ·  " .. nextTxt)
+    end
+end)
+
+-- SLOT VOUCHERS --------------------------------------------------------------
+-- Daycare and booth slot vouchers each add a permanent +1 slot.
+loop("vouchers", 20, function()
+    local used, notes = {}, {}
+    for _, v in ipairs({ { "Daycare Slot Voucher", "DaycareSlotVoucher_Consume", "daycare slot" }, { "Booth Slot Voucher", "BoothSlotVoucher_Consume", "booth slot" } }) do
+        if itemCount(v[1]) > 0 then
+            local ok, a = invoke(v[2])
+            if ok then
+                used[#used + 1] = "+1 " .. v[3]
+                invAt = 0
+            else
+                notes[#notes + 1] = v[1] .. ": " .. tostring(a)
+            end
+            task.wait(0.5)
+        end
+    end
+    if #used > 0 then UI.toast("VOUCHER", table.concat(used, ", "), THEME.good) end
+    setStatus("vouchers", #used > 0 and ("Used " .. table.concat(used, ", ")) or (#notes > 0 and table.concat(notes, "  ·  ") or "No slot vouchers in your bag"))
+end)
+
+-- KEY CHESTS -----------------------------------------------------------------
+-- Full keys open their chest (up to 100 at a time). Each chest lives in one
+-- world and only opens for someone standing at it; the hub hops there and
+-- back for whichever chests are in the world you're in.
+local KEY_CHESTS = {
+    { "Crystal Key", "CrystalKey_Unlock", "Crystal Chest" }, { "Tech Key", "TechKey_Unlock", "Tech Chest" },
+    { "Void Key", "VoidKey_Unlock", "Void Chest" }, { "Fantasy Key", "FantasyKey_Unlock", "Fantasy Chest" },
+    { "Hacker Key", "HackerKey_Unlock", "Hacker Chest" }, { "MVP Key", "MVPKey_Unlock", "MVP Chest" },
+}
+loop("keychests", 10, function()
+    local CS = game:GetService("CollectionService")
+    local keep = tonumber(Settings.values.keyKeep) or 0
+    local opened, waiting = {}, {}
+    for _, k in ipairs(KEY_CHESTS) do
+        local have = itemCount(k[1]) - keep
+        if have > 0 then
+            local chest
+            for _, c in ipairs(CS:GetTagged(k[3])) do if c:IsDescendantOf(workspace) then chest = c break end end
+            if chest then
+                local n = math.min(100, have)
+                local ok, msg = false, nil
+                withTeleport(function(root)
+                    root.CFrame = CFrame.new(chest:GetPivot().Position + Vector3.new(0, 4, 6))
+                    task.wait(0.6)
+                    ok, msg = invoke(k[2], n)
+                end)
+                if ok then
+                    opened[#opened + 1] = ("%d %s"):format(n, k[3])
+                    invAt = 0
+                else
+                    waiting[#waiting + 1] = k[3] .. ": " .. tostring(msg)
+                end
+                task.wait(2.5)
+            else
+                waiting[#waiting + 1] = ("%d %ss (chest is in another world)"):format(have, k[1])
+            end
+        end
+    end
+    if #opened > 0 then UI.toast("KEY CHESTS", "Opened " .. table.concat(opened, ", "), THEME.gold) end
+    setStatus("keychests", #opened > 0 and ("Opened " .. table.concat(opened, ", "))
+        or (#waiting > 0 and table.concat(waiting, "  ·  ") or "No full keys to use"))
 end)
 -- DAYCARE ENROLL -----------------------------------------------------------
 -- Never touches your best pets: every pet type that makes your top team
@@ -4477,9 +4690,17 @@ do
         local slots = {}
         for slot in pairs(goals) do slots[#slots + 1] = slot end
         table.sort(slots, function(a, b) return tostring(a) < tostring(b) end)
-        for _, slot in ipairs(slots) do
-            local goal = goals[slot]
-            local plan = { title = title(goal), progress = goal.Progress or 0, amount = goal.Amount or 1, stars = goal.Stars }
+        local list = {}
+        for _, slot in ipairs(slots) do list[#list + 1] = { goal = goals[slot] } end
+        -- the Item Creator's quest is worked on like a fifth rank quest
+        local ic = save().ItemCreator
+        if S.on.itemcreator and type(ic) == "table" and type(ic.Goal) == "table" and not ic.GoalCompleted then
+            list[#list + 1] = { goal = ic.Goal, prefix = "Item Creator: " }
+            if (ic.Goal.Progress or 0) < (ic.Goal.Amount or 1) then Quest.types[ic.Goal.Type] = true end
+        end
+        for _, entry in ipairs(list) do
+            local goal = entry.goal
+            local plan = { title = (entry.prefix or "") .. title(goal), progress = goal.Progress or 0, amount = goal.Amount or 1, stars = goal.Stars }
             if (goal.Progress or 0) >= (goal.Amount or 1) then
                 plan.text, plan.state = "Done - waiting for the game to hand out the next one", "done"
                 done += 1
@@ -4926,7 +5147,10 @@ function F.stopAll()
 end
 -- MISC: walkspeed ---------------------------------------------------
 local walkSpeed = 0
-RunService.Heartbeat:Connect(function()
+local walkConn
+walkConn = RunService.Heartbeat:Connect(function()
+    -- a reload starts a new copy: drop this one instead of stacking
+    if not alive() then walkConn:Disconnect() return end
     if not S.on.walkspeed then return end
     local c = LocalPlayer.Character
     local h = c and c:FindFirstChildOfClass("Humanoid")
@@ -5319,7 +5543,7 @@ do
             done = Color3.fromRGB(150, 230, 170), working = THEME.accent, blocked = Color3.fromRGB(255, 190, 110),
             manual = THEME.muted, error = Color3.fromRGB(255, 120, 130),
         }
-        for i = 1, 4 do
+        for i = 1, 5 do
             s.n += 1
             local c = new("Frame", { LayoutOrder = s.n, Size = UDim2.new(1, 0, 0, 66), BackgroundColor3 = THEME.panel, BackgroundTransparency = 0.55, ZIndex = 4 }, s.frame)
             corner(c, 12)
@@ -5377,6 +5601,12 @@ do
         end)
     end
 
+    s = UI.section(questTab, "Item Creator", THEME.accent)
+    UI.toggle(s, "itemcreator", "Auto Item Creator", "Claims the item as soon as its quest is done; Auto Rank Quests works on the quest too", false)
+    UI.status(s, "itemcreator", "Off")
+    UI.toggle(s, "itemcreatorpick", "Auto Pick (15k diamonds)", "Picks the next item for you, huge potions first", false)
+    UI.slider(s, "itemCreatorKeep", "Never go below (diamonds)", 0, 2000000, 100000, 50000)
+
     local rewards = UI.tab("Rewards", 6)
     s = UI.section(rewards, "Daily claims", THEME.gold)
     UI.toggle(s, "freegifts", "Auto Free Gifts", "Claims each play-time gift the moment it unlocks", true)
@@ -5397,6 +5627,9 @@ do
     UI.status(s, "extraclaims", "")
     UI.toggle(s, "spinwheel", "Auto Spinny Wheel", "Spends Spinny Wheel Tickets on the spawn wheel (main world)", false)
     UI.status(s, "spinwheel", "")
+    UI.toggle(s, "spinwheelworlds", "Also Spin Tech / Void / Fantasy Wheels", "Uses those wheels' own tickets while you're in their world", false)
+    UI.toggle(s, "wheeltickets", "Auto Free Wheel Tickets", "Claims every wheel's free ticket when it's ready, from anywhere", true)
+    UI.status(s, "wheeltickets", "")
     s = UI.section(rewards, "Collectibles", THEME.accent)
     UI.toggle(s, "relics", "Auto Shiny Relics", "Finds every shiny relic, no walking needed", true)
     UI.status(s, "relics", "")
@@ -5412,6 +5645,10 @@ do
     UI.toggle(s, "vending", "Auto Vending Machines", "Buys out coin vending machines in this world as they restock", false)
     UI.status(s, "vending", "")
     UI.toggle(s, "vendingdiamonds", "Include Diamond Machines", "Rare potion / enchant machines that cost diamonds", false)
+    UI.toggle(s, "cometshower", "Auto Comet Shower", "Free once a day - hops onto the button and back (World 1)", false)
+    UI.status(s, "cometshower", "Off")
+    UI.toggle(s, "areasurge", "Auto Area Surge", "Free every 15 minutes - hops onto the button and back (World 2)", false)
+    UI.status(s, "areasurge", "Off")
 
     local items = UI.tab("Items", 7)
     s = UI.section(items, "Boosts", THEME.good)
@@ -5428,6 +5665,9 @@ do
     UI.status(s, "giftbags", "")
     UI.toggle(s, "keys", "Auto Combine Key Halves", "Crystal, secret, tech, void and fantasy keys", false)
     UI.status(s, "keys", "")
+    UI.toggle(s, "keychests", "Auto Open Key Chests", "Uses full Crystal / Tech / Void / Fantasy / Hacker / MVP keys on their chest (hops there and back)", false)
+    UI.status(s, "keychests", "")
+    UI.slider(s, "keyKeep", "Keep this many of each key", 0, 100, 0, 1)
     s = UI.section(items, "Zone boosters", THEME.accent)
     UI.toggle(s, "flags", "Auto Place Flags", "Keeps every flag type up in the zone you farm", false)
     UI.status(s, "flags", "")
@@ -5458,6 +5698,8 @@ do
     UI.toggle(s, "eggslots", "Auto Egg Slots", "Buys the next egg-hatch slot bundle", false)
     UI.status(s, "eggslots", "")
     UI.slider(s, "slotReserve", "Keep at least (million diamonds)", 0, 50, 2, 1)
+    UI.toggle(s, "vouchers", "Auto Use Slot Vouchers", "Daycare and booth slot vouchers: each is a permanent +1 slot", false)
+    UI.status(s, "vouchers", "")
 
     local misc = UI.tab("Misc", 10)
     s = UI.section(misc, "Player", Color3.fromRGB(140, 210, 255))
