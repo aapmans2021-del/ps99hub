@@ -895,7 +895,8 @@ end
 -- always puts you back where you were
 local moving = false
 local function withTeleport(fn)
-    if moving then return false end
+    -- nothing hops you around while the turkey is being fought
+    if moving or S.turkeyFight then return false end
     local root = hrp()
     if not root then return false end
     moving = true
@@ -904,7 +905,8 @@ local function withTeleport(fn)
     pcall(function()
         root.Anchored = false
         root.AssemblyLinearVelocity = Vector3.zero
-        root.CFrame = home
+        -- a turkey fight started meanwhile: don't drag you back out of it
+        if not S.turkeyFight then root.CFrame = home end
     end)
     moving = false
     if not ok then warn("[PS99 Hub] " .. tostring(err)) end
@@ -3885,6 +3887,10 @@ do
         if not plot then return setStatus("wildcatch", "Only works inside the Pumpkin Tycoon") end
         local okW, Wild = pcall(m.Cmds.Feature, "Wild")
         if not (okW and Wild) then return setStatus("wildcatch", "Wild pets unlock with part 2 of the tycoon") end
+        -- a turkey is up and Auto Turkey Boss will fight it: don't catch now
+        if S.turkeyFight or (S.on.turkeyboss and F.turkeyUp and F.turkeyUp()) then
+            return setStatus("wildcatch", "Waiting - the Turkey is being fought")
+        end
         local cooldown = throwCooldown()
         if os.clock() - WildStats.lastThrow < cooldown then return end
         local nets, ultras = itemCount("Pet Net"), itemCount("Ultra Pet Net")
@@ -3935,7 +3941,8 @@ do
             local thrown = 0
             -- rarest first, one throw each, straight through the list
             for _, c in ipairs(list) do
-                if thrown >= 12 or not (S.on.wildcatch and alive()) then break end
+                -- the turkey just spawned: stop catching right away
+                if thrown >= 12 or S.turkeyFight or not (S.on.wildcatch and alive()) then break end
                 if not (c.phys.Catching or c.phys.SoldOut or attemptedPets[c.phys]) then
                     if thrown > 0 then
                         local wait = cooldown - (os.clock() - WildStats.lastThrow)
@@ -4369,6 +4376,9 @@ env.__PS99HUB_TURKEY = Turkey
 -- A rare wild pet (huge or better) that wanders on your island for a short
 -- time. It's always worth an Ultra Net, so it gets one if you have any.
 loop("turkeysighting", 2, function()
+    if S.turkeyFight or (S.on.turkeyboss and F.turkeyUp and F.turkeyUp()) then
+        return setStatus("turkeysighting", "Waiting - the Turkey is being fought")
+    end
     local okT, Tk = pcall(function() return require(RS.Library.Client.PumpkinTycoonCmds.Turkey) end)
     if not okT then return setStatus("turkeysighting", "Only works inside the Pumpkin Tycoon") end
     local expires = Tk.Sighting()
@@ -4428,7 +4438,10 @@ function EventFocus.find(match, myModel)
     end
     return nil
 end
-function EventFocus.fight(target, label, stand, key)
+function F.turkeyUp()
+    return EventFocus.find(function(id) return id:find("The Turkey", 1, true) ~= nil end, nil) ~= nil
+end
+function EventFocus.fight(target, label, stand, key, refind)
     local assigned = {}
     S.eventFocus = label
     local t0 = os.clock()
@@ -4443,22 +4456,38 @@ function EventFocus.fight(target, label, stand, key)
     task.spawn(function()
         local gap = 1 / rate
         local nextTap = os.clock()
-        while tapping and target.Parent and alive() do
-            pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", target.Name)
-            S.counts.taps = (S.counts.taps or 0) + 1
+        while tapping and alive() do
+            if target and target.Parent then
+                pcall(G.Network.UnreliableFire, "Breakables_PlayerDealDamage", target.Name)
+                S.counts.taps = (S.counts.taps or 0) + 1
+            end
             nextTap += gap
             local wait = nextTap - os.clock()
             if wait > 0 then task.wait(wait) else nextTap = os.clock() task.wait() end
         end
     end)
-    while target.Parent and S.on[key] and alive() and os.clock() - t0 < 900
+    -- the game sometimes destroys and re-creates the breakable's model; that
+    -- isn't the end of the fight, so look for it again and only stop once
+    -- it has really been gone for a few seconds
+    local missingSince
+    while S.on[key] and alive() and os.clock() - t0 < 900
         and not (S.turkeyFight and key ~= "turkeyboss") do
+        if not (target and target.Parent) then
+            local again = refind and refind() or nil
+            if again then
+                target, missingSince = again, nil
+                table.clear(assigned)
+            else
+                missingSince = missingSince or os.clock()
+                if os.clock() - missingSince > 3 then break end
+            end
+        end
         local root = hrp()
         if root and (root.Position - stand.Position).Magnitude > 25 then
             root.AssemblyLinearVelocity = Vector3.zero
             root.CFrame = stand
         end
-        F.drivePets(assigned, { target })
+        if target and target.Parent then F.drivePets(assigned, { target }) end
         task.wait(0.15)
     end
     tapping = false
@@ -4475,10 +4504,10 @@ function EventFocus.goBack(back)
     Tycoon.retarget = true
 end
 -- run a fight on its own thread so it never holds a scheduler slot
-function EventFocus.start(target, label, stand, key, after)
+function EventFocus.start(target, label, stand, key, after, refind)
     S.eventFocus = label
     task.spawn(function()
-        local ok, err = pcall(EventFocus.fight, target, label, stand, key)
+        local ok, err = pcall(EventFocus.fight, target, label, stand, key, refind)
         S.eventFocus = nil
         if not ok then setStatus(key, "Fight stopped: " .. tostring(err):sub(1, 60)) end
         pcall(after)
@@ -4585,7 +4614,7 @@ loop("enchantswap", 1, function()
     if changed then UI.toast("ENCHANTS", (fighting and "Turkey set: " or "Farm set: ") .. tostring(b), THEME.accent) end
     setStatus("enchantswap", (fighting and "Turkey fight set  ·  " or "Farming set  ·  ") .. tostring(b))
 end)
-loop("turkeyboss", 1, function()
+loop("turkeyboss", 0.5, function()
     local plot, myModel, m = Tycoon.plot()
     if not plot then return setStatus("turkeyboss", "Only works inside the Pumpkin Tycoon") end
     local t = EventFocus.find(function(id) return id:find("The Turkey", 1, true) ~= nil end, nil)
@@ -4639,13 +4668,18 @@ loop("turkeyboss", 1, function()
     end
     setStatus("turkeyboss", "Fighting the Turkey with every pet")
     UI.toast("TURKEY", "Flying to the turkey fight", THEME.gold)
+    local function findTurkey()
+        return EventFocus.find(function(id) return id:find("The Turkey", 1, true) ~= nil end, nil)
+    end
     EventFocus.start(t, "the Turkey", CFrame.new(pos + Vector3.new(0, 5, 24), pos), "turkeyboss", function()
+        -- still up and still wanted: stay in the arena, the next tick picks it up again
+        if S.on.turkeyboss and findTurkey() then return end
         S.turkeyFight = false
         if S.on.enchantswap and Enchants then pcall(Enchants.apply, false) end
         EventFocus.goBack(back)
         S.counts.turkeys = (S.counts.turkeys or 0) + 1
         setStatus("turkeyboss", ("Turkey fight done  ·  %d this session  ·  back to farming"):format(S.counts.turkeys))
-    end)
+    end, findTurkey)
 end)
 loop("orchardchests", 2, function()
     local plot, myModel = Tycoon.plot()
